@@ -964,13 +964,24 @@ function registerIpc() {
         const total = selected.length;
         let done = 0;
         let okCount = 0;
+        let skipCount = 0;
         let failCount = 0;
         const existingIds = new Set(existing.keys());
         for (const cand of selected) {
           if (t && t.cancelled) break;
           const res = await copyOne(cand, cpaths, existingIds);
           done++;
-          if (res && res.succeeded && res.indexItem) {
+          if (res && res.skipped) {
+            // 已缓存：不算失败，也不重复写 index
+            skipCount++;
+            win && win.webContents.send('cache-progress', {
+              taskId: tid,
+              done, total,
+              currentName: String(cand.name || cand.id || ''),
+              succeeded: true,
+              skipped: true,
+            });
+          } else if (res && res.succeeded && res.indexItem) {
             idx.items = Array.isArray(idx.items) ? idx.items : [];
             idx.items.push(res.indexItem);
             existingIds.add(String(cand.id));
@@ -996,7 +1007,7 @@ function registerIpc() {
         await writeIndex(idx);
         win && win.webContents.send('cache-done', {
           taskId: tid,
-          summary: { ok: okCount, fail: failCount, indexVersion: idx.version },
+          summary: { ok: okCount, fail: failCount, skip: skipCount, indexVersion: idx.version },
         });
       } catch (e) {
         console.error('[cache] cache-selected-resources fatal:', e);

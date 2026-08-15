@@ -114,6 +114,21 @@ const DEFAULT_PARAMS = {
 };
 let PARAMS = {};
 const PARAM_DEFS = DEFAULT_PARAMS;
+// 启动回灌参数时置 true，抑制 applyParam 中的状态栏提示噪音
+let initApplyingParams = false;
+// 启动时把所有已持久化参数回灌到渲染管线/灯光/网格等（物理/IK 需 helper 重建的除外，它们由 buildHelperOptions 读取）
+function applyAllParams() {
+  initApplyingParams = true;
+  try {
+    for (const gk of Object.keys(PARAMS || {})) {
+      const [g, k] = String(gk).split('.');
+      if (!g || !k) continue;
+      try { applyParam(g, k, PARAMS[gk], undefined); } catch (_) { /* noop */ }
+    }
+  } finally {
+    initApplyingParams = false;
+  }
+}
 function flattenParams(src) {
   const out = {};
   for (const g of Object.keys(src || {})) {
@@ -204,7 +219,9 @@ function applyParam(group, key, value, prev) {
     if (group === 'physics') {
       // gravity 对 physics world（已启动的）重建成本高，保留在下一次 helper.add；此处只提示
       if (key === 'gravity' || key === 'unitStep' || key === 'maxStepNum' || key === 'enabled' || key === 'autoDisableHeavy') {
-        try { setStatus(`物理参数「${key}」会在下一次加载模型/停止动作时应用`, 'warn'); } catch (_) { /* noop */ }
+        if (!initApplyingParams) {
+          try { setStatus(`物理参数「${key}」会在下一次加载模型/停止动作时应用`, 'warn'); } catch (_) { /* noop */ }
+        }
       }
     }
     if (group === 'ik') {
@@ -257,13 +274,17 @@ function applyParam(group, key, value, prev) {
     }
     if (key === 'resetOnStop') {
       // 记录在 PARAMS，btn-stop 读取；用户可见反馈
-      try { setStatus(value ? '停止时将回到 BindPose' : '停止时保持当前姿势', 'info'); } catch (_) { /* noop */ }
+      if (!initApplyingParams) {
+        try { setStatus(value ? '停止时将回到 BindPose' : '停止时保持当前姿势', 'info'); } catch (_) { /* noop */ }
+      }
     }
     if (key === 'afterglow') {
       // afterglow 是 MMDAnimationHelper.configuration 级别，需要重建 helper（或直接改 configuration）
       if (mmdHelper && mmdHelper.configuration) {
         mmdHelper.configuration.afterglow = Math.max(0, Number(value) || 0);
-        setStatus(`切动作余辉：${(Number(value) || 0).toFixed(2)}s`, 'info');
+      }
+      if (!initApplyingParams) {
+        try { setStatus(`切动作余辉：${(Number(value) || 0).toFixed(2)}s`, 'info'); } catch (_) { /* noop */ }
       }
     }
   }
@@ -1305,6 +1326,8 @@ function clearModel() {
   vmdFiles = [];
   vmdListEl.innerHTML = '';
   animPanel.classList.add('hidden');
+  // 清空描边所选对象，避免残留已释放网格引用
+  refreshOutlineSelection();
 }
 function disposeObject(obj) {
   obj.traverse((child) => {
@@ -1866,7 +1889,8 @@ function bindCacheEventsOnce() {
         setStatus('缓存复制失败：' + p.error, 'error');
       } else {
         const s = p.summary || { ok: 0, fail: 0 };
-        setStatus(`缓存完成：成功 ${s.ok}，失败 ${s.fail}`, s.fail > 0 ? 'warn' : 'success');
+        const skipTxt = Number(s.skip) > 0 ? `，跳过 ${s.skip}（已缓存）` : '';
+        setStatus(`缓存完成：成功 ${s.ok}，失败 ${s.fail}${skipTxt}`, s.fail > 0 ? 'warn' : 'success');
       }
       await refreshCacheItems();
       renderCacheTab();
@@ -2380,6 +2404,8 @@ async function initAmmo() {
 async function init() {
   loadRecent();
   loadParams();
+  // 启动时把已持久化的渲染/动画参数回灌到渲染管线、灯光、网格等（物理/IK 参数由 helper.add 时读取）
+  applyAllParams();
   // 先启动 ammo 预加载（与扫描根目录并行，保证第一个模型加载时 ammo 已就绪）
   const ammoPromise = initAmmo();
   try {
