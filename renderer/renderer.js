@@ -59,6 +59,9 @@ let motionRootItems = [];
 let motionFilterKw = '';
 let recentItems = [];
 
+// Win10 扁平文件树辅助：dir 行的 path -> Set(所有后代 rows 的引用)
+const dirDescendants = new Map();  // key: dirPath(normalized) -> Set<HTMLElement>
+
 // ---------- 最近加载（localStorage 持久化） ----------
 const RECENT_KEY = 'mmdviewer_recent';
 const RECENT_MAX = 20;
@@ -424,92 +427,140 @@ function switchTab(tab, updateHistory = true) {
   }
 }
 
-// ---------- 目录树 ----------
+// ---------- 目录树 (Win10 列表扁平 grid) ----------
 function renderTree(root) {
   fileTreeEl.innerHTML = '';
-  const rootNode = document.createElement('div');
-  rootNode.className = 'tree-item';
-  rootNode.innerHTML = `<span class="twisty">▾</span>${iconFor('dir')}<span class="name">${escapeHtml(root.name)}</span><span class="badge">根</span>`;
-  rootNode.addEventListener('click', (e) => { e.stopPropagation(); toggleDir(rootNode, root); });
-  fileTreeEl.appendChild(rootNode);
-
-  const children = document.createElement('div');
-  children.className = 'tree-children';
-  rootNode.appendChild(children);
-  root.children.forEach((n) => children.appendChild(buildNode(n)));
+  dirDescendants.clear();
+  // 根节点本身也要一行（Win10 风格）
+  appendWin10Row(root, 0, true);
+  // root 默认展开
+  if (root.children) {
+    root.children.forEach((c) => dfsAppend(c, 1, [root]));
+  }
 }
-function buildNode(node) {
-  const item = document.createElement('div');
-  item.className = 'tree-item';
-  item.title = node.path || node.name;
-  item.dataset.path = (node.path || '').replace(/\\/g, '/');
-
-  if (node.type === 'dir') {
-    item.innerHTML = `<span class="twisty">▸</span>${iconFor('dir')}<span class="name">${escapeHtml(node.name)}</span>`;
-    const childWrap = document.createElement('div');
-    childWrap.className = 'tree-children collapsed';
-    item.appendChild(childWrap);
-    item.addEventListener('click', (e) => { e.stopPropagation(); toggleDir(item, node, childWrap); });
-    item.addEventListener('dblclick', (e) => { e.stopPropagation(); navigateTo(node.path, 'models', true); });
-    if (node.children && node.children.length) {
-      node.children.forEach((c) => childWrap.appendChild(buildNode(c)));
+function dfsAppend(node, depth, ancestorDirs) {
+  const row = appendWin10Row(node, depth, false);
+  // 挂到所有祖先 dir 的后代集合（便于 toggle 时一次性显示/隐藏）
+  ancestorDirs.forEach((a) => {
+    const key = normalizePath(a.path || a.name);
+    if (!dirDescendants.has(key)) dirDescendants.set(key, new Set());
+    dirDescendants.get(key).add(row);
+  });
+  if (node.type === 'dir' && node.children && node.children.length) {
+    const nextAncestors = ancestorDirs.concat([node]);
+    node.children.forEach((c) => dfsAppend(c, depth + 1, nextAncestors));
+    // 自己也作为后代的控制者
+    const me = normalizePath(node.path || node.name);
+    if (!dirDescendants.has(me)) dirDescendants.set(me, new Set());
+    // 初始状态：一级目录不默认折叠，深层默认折叠（保持初始视图简洁）
+    if (depth >= 1) {
+      dirDescendants.get(me).forEach((r) => r.classList.add('collapsed-descendant'));
+      const twisty = row.querySelector('.w10-twisty');
+      if (twisty) twisty.textContent = '▸';
     }
+  }
+}
+function normalizePath(p) { return (p || '').replace(/\\/g, '/'); }
+function appendWin10Row(node, depth, isRoot) {
+  const row = document.createElement('div');
+  row.className = 'win10-row';
+  row.dataset.path = normalizePath(node.path);
+  row.dataset.isDir = node.type === 'dir' ? '1' : '0';
+  row.dataset.depth = depth;
+  row.dataset.name = node.name || '';
+  row.title = (node.path || '') + (node.size ? ` (${fmtSize(node.size)})` : '');
+
+  const isVmd = MOTION_EXTS_RE.test(node.name);
+  const isDir = node.type === 'dir';
+  const icon = isRoot ? '🖥️' : isDir ? iconFor('dir') : isVmd ? iconFor('motion') : iconFor(node.type);
+  const size = isDir ? '' : (node.size != null ? fmtSize(node.size) : '');
+  const twisty = (isDir ? (depth === 0 ? '▾' : '▸') : '');
+
+  const indGrp = document.createElement('div');
+  indGrp.className = 'w10-icongrp';
+  indGrp.style.marginLeft = (depth * 14) + 'px';
+  indGrp.innerHTML = `<span class="w10-twisty">${twisty}</span><span class="w10-icon">${icon}</span>`;
+
+  const name = document.createElement('div');
+  name.className = 'w10-name';
+  name.textContent = node.name || '(根)';
+
+  const sz = document.createElement('div');
+  sz.className = 'w10-size';
+  sz.textContent = size;
+
+  row.appendChild(indGrp);
+  row.appendChild(name);
+  row.appendChild(sz);
+
+  // 事件
+  if (isDir) {
+    row.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // 点 dir：先展开/折叠（toggleDir），再选中高亮 + 鼠标进入预览卡
+      clearSelection();
+      row.classList.add('selected');
+      toggleDir(row);
+      showPreviewCardForNode(node);
+    });
+    row.addEventListener('dblclick', (e) => { e.stopPropagation(); navigateTo(node.path, 'models', true); });
   } else {
-    const isVmd = MOTION_EXTS_RE.test(node.name);
-    const displayIcon = isVmd ? iconFor('motion') : iconFor(node.type);
-    item.innerHTML = `<span class="twisty"></span>${displayIcon}<span class="name">${escapeHtml(node.name)}</span><span class="badge">${fmtSize(node.size)}</span>`;
-    item.addEventListener('click', (e) => {
+    row.addEventListener('click', (e) => {
       e.stopPropagation();
       clearSelection();
-      item.classList.add('selected');
+      row.classList.add('selected');
       selectFile(node);
     });
-    item.addEventListener('mouseenter', () => showPreviewCardForNode(node));
-    item.addEventListener('mouseleave', hidePreviewCard);
+    row.addEventListener('mouseenter', () => showPreviewCardForNode(node));
+    row.addEventListener('mouseleave', hidePreviewCard);
   }
-  return item;
+
+  fileTreeEl.appendChild(row);
+  return row;
 }
-function toggleDir(item, node, childWrap) {
-  const wrap = childWrap || item.querySelector(':scope > .tree-children');
-  const twisty = item.querySelector('.twisty');
-  if (!wrap) return;
-  if (wrap.classList.contains('collapsed')) {
-    wrap.classList.remove('collapsed');
-    if (twisty) twisty.textContent = '▾';
+function toggleDir(rowEl, forceExpand) {
+  if (rowEl?.dataset?.isDir !== '1') return;
+  const key = normalizePath(rowEl.dataset.path);
+  const desc = dirDescendants.get(key);
+  const twisty = rowEl.querySelector('.w10-twisty');
+  if (!twisty) return;
+  const currentlyCollapsed = twisty.textContent === '▸';
+  const shouldExpand = forceExpand === undefined ? currentlyCollapsed : !!forceExpand;
+  if (shouldExpand) {
+    // 展开：所有后代都可见（已折叠的子目录自己的后代由子目录的 twisty 独立控制）
+    twisty.textContent = '▾';
+    if (desc) desc.forEach((r) => r.classList.remove('collapsed-descendant'));
   } else {
-    wrap.classList.add('collapsed');
-    if (twisty) twisty.textContent = '▸';
+    // 折叠：所有后代全部隐藏（与 Win10 资源管理器一致）
+    twisty.textContent = '▸';
+    if (desc) desc.forEach((r) => r.classList.add('collapsed-descendant'));
   }
 }
 function expandPath(nodePath) {
-  const norm = (nodePath || '').replace(/\\/g, '/');
+  const norm = normalizePath(nodePath);
   if (!norm) return null;
+  // 找到目标行
+  const target = [...fileTreeEl.querySelectorAll('.win10-row')].find((r) => r.dataset.path === norm);
+  if (!target) return null;
+  // 从根到 target，沿途所有 dir 强制展开
   const parts = norm.split('/');
-  const prefix = parts.slice(0, -1);
-  let current = fileTreeEl.firstElementChild;
-  if (!current) return null;
-  for (let i = 0; i < prefix.length; i++) {
-    if (!current) break;
-    const wrap = current.querySelector(':scope > .tree-children');
-    if (wrap) {
-      wrap.classList.remove('collapsed');
-      const twisty = current.querySelector('.twisty');
-      if (twisty) twisty.textContent = '▾';
-    }
-    const childItems = wrap ? [...wrap.children] : [];
-    current = childItems.find((el) => el.dataset.path === parts.slice(0, i + 1).join('/')) || null;
+  for (let i = 1; i < parts.length; i++) {
+    const sub = parts.slice(0, i).join('/');
+    const row = [...fileTreeEl.querySelectorAll('.win10-row')].find((r) => r.dataset.path === sub);
+    if (row && row.dataset.isDir === '1') toggleDir(row, true);
   }
-  if (current) {
-    const wrap = current.querySelector(':scope > .tree-children');
-    if (wrap) {
-      const target = [...wrap.children].find((el) => el.dataset.path === norm);
-      return target || null;
-    }
-  }
-  return null;
+  // 目标可见并滚到视图
+  target.classList.remove('collapsed-descendant');
+  target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  return target;
 }
 function clearSelection() {
-  fileTreeEl.querySelectorAll('.tree-item.selected').forEach((el) => el.classList.remove('selected'));
+  fileTreeEl.querySelectorAll('.win10-row.selected').forEach((el) => el.classList.remove('selected'));
+}
+function setSelectedByPath(p) {
+  const t = expandPath(p);
+  clearSelection();
+  if (t) t.classList.add('selected');
 }
 
 // ---------- 原生文件对话框 ----------
@@ -627,9 +678,7 @@ function findFirstModel(node) {
 
 // ---------- 文件选择与预览卡 ----------
 function selectFile(node) {
-  clearSelection();
-  const el = expandPath(node.path);
-  if (el) { el.classList.add('selected'); el.scrollIntoView({ block: 'nearest' }); }
+  setSelectedByPath(node.path);
   if (node.type === 'model') {
     if (MOTION_EXTS_RE.test(node.name)) {
       currentModelPath && currentMesh

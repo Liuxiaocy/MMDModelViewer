@@ -679,3 +679,52 @@ body {
 
 /* 工具类 */
 .hidden { display: none !important; }
+
+/* ====== Win10 列表风格（覆盖旧 .tree-item 嵌套） ====== */
+#file-tree { padding: 0; }
+#file-tree > .tree-item,
+.tree-children { margin-left: 0 !important; padding-left: 0 !important; border-left: none !important; }
+#file-tree > .tree-item,
+.tree-item { background: none; border: none; margin: 0; padding: 0; }
+#file-tree > .tree-item > .twisty,
+.tree-item > .twisty { display: none; }
+.tree-item > .name,
+.tree-item > .badge { display: none; }
+.tree-children.collapsed { display: block; }   /* 折叠现在用 .collapsed-descendant */
+
+/* Win10 行容器（file-tree 的直接 children） */
+.win10-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 22px;
+  line-height: 22px;
+  cursor: pointer;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  font-size: 12px;
+  color: #1C1C1C;
+  user-select: none;
+}
+.win10-row:hover { background: #E5F3FF; }
+.win10-row.selected { background: #CCE8FF; }
+.win10-row.collapsed-descendant { display: none; }
+
+/* 缩进 + twisty + 图标 的 group */
+.w10-icongrp { display: flex; align-items: center; min-width: 0; }
+.w10-twisty {
+  width: 14px; text-align: center; color: #767676; font-size: 10px; flex-shrink: 0;
+  line-height: 1;
+}
+.w10-twisty:empty { display: inline-block; width: 14px; }
+.w10-icon { width: 18px; text-align: center; font-size: 13px; flex-shrink: 0; }
+
+.w10-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  padding-right: 2px;
+}
+.w10-size {
+  width: 64px; text-align: right; font-size: 11px; color: #666;
+  padding-right: 4px; min-width: 0;
+}
