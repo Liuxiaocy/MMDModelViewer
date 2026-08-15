@@ -728,3 +728,479 @@ body {
   width: 64px; text-align: right; font-size: 11px; color: #666;
   padding-right: 4px; min-width: 0;
 }
+
+/* ============ 参数面板 & 缓存资源 Tab & 对话框 · 新增样式 ============ */
+
+/* ------ Tab 容器（右栏 #info-panel 顶部） ------ */
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  flex-shrink: 0;
+}
+.tab-btn {
+  flex: 1;
+  padding: 6px 8px;
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  cursor: pointer;
+  transition: all var(--t-fast);
+  font-family: inherit;
+}
+.tab-btn:hover { color: var(--accent); background: var(--bg-hover); }
+.tab-btn.active {
+  color: var(--accent);
+  background: var(--bg-card);
+  border-color: var(--border);
+  position: relative;
+  bottom: -1px;
+  z-index: 1;
+}
+
+.tab-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 14px;
+}
+.tab-content.hidden { display: none; }
+
+.badge-muted {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  border-radius: var(--r-full);
+  vertical-align: middle;
+  font-weight: 500;
+}
+
+/* ------ 顶栏自动识别缓存 Switch ------ */
+.toolbar-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 6px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  font-family: inherit;
+}
+.toolbar-switch input[type="checkbox"] { margin: 0; }
+
+/* ------ 参数面板分组 ------ */
+.param-group { margin-bottom: 16px; }
+.group-title {
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--accent);
+  margin: 4px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border);
+  letter-spacing: 0.02em;
+}
+.group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.param-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.param-label {
+  color: var(--text-muted);
+  padding-right: 4px;
+  font-size: 12px;
+  word-break: keep-all;
+}
+.param-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.param-control select,
+.param-control input[type="text"],
+.param-control input[type="number"] {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  outline: none;
+  font-family: inherit;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.param-control select:focus,
+.param-control input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.10);
+}
+.param-control input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+  height: 22px;
+}
+.param-control input[type="color"] {
+  width: 30px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.param-num-val {
+  width: 46px;
+  text-align: right;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.param-row.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* ------ 通用 Switch（参数面板 & 其它地方） ------ */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  font-family: inherit;
+}
+.switch input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 30px;
+  height: 16px;
+  background: var(--border-strong);
+  border-radius: var(--r-full);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--t-fast);
+  flex-shrink: 0;
+}
+.switch input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform var(--t-fast);
+  box-shadow: 0 1px 2px rgba(15,23,42,0.20);
+}
+.switch input[type="checkbox"]:checked { background: var(--accent); }
+.switch input[type="checkbox"]:checked::after { transform: translateX(14px); }
+
+.param-actions {
+  margin-top: 4px;
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.btn-danger {
+  background: var(--danger-light);
+  color: var(--danger);
+  border: 1px solid #FECACA;
+  transition: all var(--t-fast);
+  font-family: inherit;
+}
+.btn-danger:hover { background: #FECACA; color: #991B1B; border-color: #F87171; }
+
+/* ------ 缓存资源 Tab ------ */
+.cache-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.cache-toolbar > .filter-input {
+  width: 100%;
+  order: -999;
+}
+.segmented {
+  display: inline-flex;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+.seg {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  transition: all var(--t-fast);
+  font-family: inherit;
+  white-space: nowrap;
+}
+.seg:last-child { border-right: none; }
+.seg:hover { color: var(--text); background: var(--bg-hover); }
+.seg.active {
+  color: #fff;
+  background: var(--accent);
+}
+.cache-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.cache-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 10px;
+}
+.cache-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: all var(--t-fast);
+  cursor: pointer;
+}
+.cache-card:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+  background: #fff;
+}
+.cache-thumb {
+  aspect-ratio: 4 / 3;
+  background: var(--bg-hover);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.cache-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.cache-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cache-name {
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cache-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.cache-sub .tag-small {
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  font-size: 10px;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 600;
+}
+.cache-sub .tag-small.motion { background: var(--accent-2-light); color: var(--accent-2); }
+.cache-btns {
+  display: flex;
+  gap: 4px;
+}
+.cache-btns .btn { flex: 1; font-size: 11px; padding: 4px 6px; }
+
+/* ------ 进度条 ------ */
+.progress-track {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-hover);
+  border-radius: var(--r-full);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), #8B5CF6);
+  transition: width var(--t-fast);
+}
+
+/* ------ 对话框（使用 <dialog> 元素 + 玻璃风） ------ */
+dialog.glass-modal {
+  border: none;
+  padding: 0;
+  max-width: min(640px, 92vw);
+  width: 520px;
+  border-radius: var(--r-xl);
+  background: var(--bg-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-xl);
+  color: var(--text);
+  font-family: inherit;
+}
+dialog.glass-modal::backdrop {
+  background: rgba(15, 23, 42, 0.24);
+  backdrop-filter: blur(4px);
+}
+.modal-inner {
+  padding: 18px 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-title {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.modal-body {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.modal-body .section {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 12px;
+  margin: 2px 0 0;
+}
+.modal-body .subsection {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.modal-body .mb { margin-bottom: 6px; }
+.modal-body .mt { margin-top: 6px; }
+.scan-roots-ul {
+  list-style: none;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-glass);
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.scan-roots-ul li {
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.scan-roots-ul li:hover { background: var(--bg-hover); }
+.scan-roots-ul li label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.scan-roots-ul li label span { flex: 1; min-width: 0; }
+
+.pick-list {
+  list-style: none;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-glass);
+  max-height: 42vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pick-list li {
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.pick-list li:hover { background: var(--bg-hover); }
+.pick-list li label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.pick-list li label > small { color: var(--text-dim); font-size: 10px; word-break: break-all; }
+.pick-list li.muted { color: var(--text-muted); }
