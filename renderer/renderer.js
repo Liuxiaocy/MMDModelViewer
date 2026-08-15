@@ -3,6 +3,12 @@ import * as THREE from 'three';
 import { OrbitControls } from '../node_modules/three/examples/jsm/controls/OrbitControls.js';
 import { MMDLoader } from '../node_modules/three/examples/jsm/loaders/MMDLoader.js';
 import { MMDAnimationHelper } from '../node_modules/three/examples/jsm/animation/MMDAnimationHelper.js';
+import { EffectComposer } from '../node_modules/three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from '../node_modules/three/examples/jsm/postprocessing/RenderPass.js';
+import { OutlinePass } from '../node_modules/three/examples/jsm/postprocessing/OutlinePass.js';
+import { ShaderPass } from '../node_modules/three/examples/jsm/postprocessing/ShaderPass.js';
+import { OutputPass } from '../node_modules/three/examples/jsm/postprocessing/OutputPass.js';
+import { FXAAShader } from '../node_modules/three/examples/jsm/shaders/FXAAShader.js';
 
 const api = window.mmdAPI;
 const MOTION_EXTS_RE = /\.(vmd|vpd)$/i;
@@ -219,6 +225,11 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
+// ---------- Post-processing: 稳定边缘抖动 + 抗锯齿 ----------
+const composer = new EffectComposer(renderer);
+// 注：scene/camera 在此处尚未声明，所以我们等 scene/camera 声明完之后再重建 RenderPass 与 OutlinePass
+// 先插入占位 composer；真正的 pass 顺序在 scene/camera/灯光声明之后一次性构建
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xF0F1F5);
 scene.fog = new THREE.Fog(0xF0F1F5, 40, 140);
@@ -253,6 +264,32 @@ scene.add(dirLight);
 const fillLight = new THREE.DirectionalLight(0x8FB0FF, 0.30);
 fillLight.position.set(-3, 2, -4);
 scene.add(fillLight);
+
+// ---------- 正式构建后处理管线（scene/camera/灯光均已就绪） ----------
+composer.passes = [];
+const renderPassFinal = new RenderPass(scene, camera);
+composer.addPass(renderPassFinal);
+const resolution = new THREE.Vector2(canvas.clientWidth || 1, canvas.clientHeight || 1);
+const outlinePass = new OutlinePass(resolution, scene, camera, []);
+outlinePass.edgeStrength = getParam('render', 'edgeStrength', 0.9);
+outlinePass.edgeThickness = getParam('render', 'edgeThickness', 0.003);
+outlinePass.visibleEdgeColor = new THREE.Color(String(getParam('render', 'edgeColor', '#111827')));
+outlinePass.hiddenEdgeColor = new THREE.Color(0x000000);
+outlinePass.edgeGlow = 0;
+outlinePass.downSampleRatio = 2;
+outlinePass.pulsePeriod = 0;
+composer.addPass(outlinePass);
+const fxaaPass = new ShaderPass(FXAAShader);
+fxaaPass.uniforms['resolution'].value = new THREE.Vector2(
+  1 / (resolution.x * renderer.getPixelRatio()),
+  1 / (resolution.y * renderer.getPixelRatio())
+);
+fxaaPass.enabled = !!getParam('render', 'fxaaEnabled', true);
+composer.addPass(fxaaPass);
+const outputPass = new OutputPass();
+composer.addPass(outputPass);
+outlinePass.enabled = !!getParam('render', 'outlineEnabled', true);
+window.__postfx = { composer, renderPass: renderPassFinal, outlinePass, fxaaPass, outputPass };
 
 // 地面
 const gridHelper = new THREE.GridHelper(20, 20, 0xCBD5E1, 0xE2E8F0);
@@ -1166,6 +1203,12 @@ async function loadModel(node) {
     });
     currentModel = mesh;
     currentMesh = mesh;
+    // 更新轮廓描边所选对象（包含所有子网格）—— Task 10 会封装为统一方法
+    if (window.__postfx && window.__postfx.outlinePass) {
+      const sel = [];
+      mesh.traverse && mesh.traverse((c) => { if (c && c.isMesh) sel.push(c); });
+      window.__postfx.outlinePass.selectedObjects = sel;
+    }
     scene.add(mesh);
 
     // ====== 交给 MMDAnimationHelper 统一驱动（IK + 物理 + 动画） ======
@@ -1366,7 +1409,11 @@ function animate() {
     }
   }
   controls.update();
-  renderer.render(scene, camera);
+  if (window.__postfx && window.__postfx.composer) {
+    window.__postfx.composer.render(d);
+  } else {
+    renderer.render(scene, camera);
+  }
 }
 animate();
 
@@ -1377,6 +1424,19 @@ function resize() {
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  if (window.__postfx && window.__postfx.composer) {
+    window.__postfx.composer.setSize(w, h);
+    const pixelRatio = renderer.getPixelRatio();
+    if (window.__postfx.fxaaPass) {
+      const u = window.__postfx.fxaaPass.uniforms && window.__postfx.fxaaPass.uniforms['resolution'];
+      if (u && u.value) {
+        u.value.set(1 / (w * pixelRatio), 1 / (h * pixelRatio));
+      }
+    }
+    if (window.__postfx.outlinePass) {
+      window.__postfx.outlinePass.resolution.set(w, h);
+    }
+  }
 }
 window.addEventListener('resize', resize);
 resize();
