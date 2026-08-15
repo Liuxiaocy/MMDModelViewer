@@ -12,6 +12,11 @@ const seven = require('7zip-min');
 const sevenBin = require('7zip-bin');
 const unrar = require('node-unrar-js');
 
+// 冒烟测试使用独立 userData：避免污染真实缓存（真实缓存受系统/沙箱写限制时也影响验证）
+if (process.argv.includes('--smoke-test')) {
+  app.setPath('userData', path.join(__dirname, '.smoke-userdata'));
+}
+
 const DEFAULT_ROOT = 'D:\\素材\\3D模型';
 const MOTION_ROOT = path.join(DEFAULT_ROOT, '动作');
 const SCENE_ROOT = path.join(DEFAULT_ROOT, '场景');
@@ -608,18 +613,26 @@ function registerIpc() {
       const it = items[i];
       try {
         if (it && it.cachePath) {
-          const abs = String(it.cachePath).startsWith(p.root)
-            ? String(it.cachePath)
-            : path.join(p.root, String(it.cachePath));
-          try { await fsp.unlink(abs); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-          try {
-            const parentDir = path.dirname(abs);
-            const rel = path.relative(p.root, parentDir);
-            if (rel && !rel.startsWith('..')) {
-              const ents = await fsp.readdir(parentDir);
-              if (!ents.length) await fsp.rmdir(parentDir);
-            }
-          } catch (_) { /* noop */ }
+          if (it.srcDir) {
+            // 整包缓存：删除整个缓存目录
+            const absDir = String(it.srcDir).startsWith(p.root)
+              ? String(it.srcDir)
+              : path.join(p.root, String(it.srcDir));
+            try { await fsp.rm(absDir, { recursive: true, force: true }); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+          } else {
+            const abs = String(it.cachePath).startsWith(p.root)
+              ? String(it.cachePath)
+              : path.join(p.root, String(it.cachePath));
+            try { await fsp.unlink(abs); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+            try {
+              const parentDir = path.dirname(abs);
+              const rel = path.relative(p.root, parentDir);
+              if (rel && !rel.startsWith('..')) {
+                const ents = await fsp.readdir(parentDir);
+                if (!ents.length) await fsp.rmdir(parentDir);
+              }
+            } catch (_) { /* noop */ }
+          }
         }
         if (it && it.thumb) {
           const tAbs = path.join(p.root, String(it.thumb));
@@ -972,6 +985,61 @@ function registerIpc() {
     const subDir = type === 'motion' ? cpaths.motions : cpaths.models;
     const absDest = path.join(subDir, cacheFile);
     const relDest = (type === 'motion' ? 'motions/' : 'models/') + cacheFile;
+
+    // 模型压缩包：整包解压缓存，保证 Tex/AONMPB 等同包贴图资源随模型一起可用
+    if (sourceType === 'archive' && type === 'model') {
+      let tmpDirToClean = null;
+      try {
+        const dest = await extractArchive(sourcePath);
+        tmpDirToClean = dest;
+        let found = await findFileInDirCaseInsensitive(dest, archiveEntry);
+        if (!found && archiveEntry) {
+          // 条目名可能因编码差异不匹配：按扩展名递归回退
+          const byExt = await findFilesByExt(dest, new Set(['.pmx', '.pmd']));
+          if (byExt.length === 1) found = byExt[0];
+          else if (byExt.length > 1) {
+            const base = path.basename(String(archiveEntry || '')).toLowerCase();
+            found = byExt.find(f => path.basename(f).toLowerCase() === base) || null;
+          }
+        }
+        if (!found) {
+          return { succeeded: false, skipped: false, reason: 'archive_entry_not_found:' + (archiveEntry || '') };
+        }
+        const dirName = `${safeBase}-${shortId}`;
+        const absDir = path.join(subDir, dirName);
+        const relDir = 'models/' + dirName;
+        try { await fsp.rm(absDir, { recursive: true, force: true }); } catch (_) { /* noop */ }
+        await fsp.mkdir(absDir, { recursive: true });
+        // 递归复制整个解压目录（fs.cp 需 Node 16.7+，Electron 内置 Node 满足）
+        await fsp.cp(dest, absDir, { recursive: true, force: true });
+        const cacheSize = await calcDirSize(absDir);
+        return {
+          succeeded: true,
+          skipped: false,
+          indexItem: {
+            id, type,
+            name: String(name || ''),
+            ext: String(ext || '').toLowerCase(),
+            sourcePath: String(sourcePath || ''),
+            sourceType: 'archive',
+            archiveEntry: archiveEntry || null,
+            srcDir: relDir,
+            cachePath: relDir + '/' + path.basename(found),
+            thumb: null,
+            cacheSize,
+            addedAt: Date.now(),
+          },
+        };
+      } catch (e) {
+        console.error('[cache] copyOne(whole-package) failed:', candidate, e);
+        return { succeeded: false, skipped: false, reason: (e && e.message) || String(e) };
+      } finally {
+        if (tmpDirToClean) {
+          try { await fsp.rm(tmpDirToClean, { recursive: true, force: true }); } catch (_) { /* noop */ }
+          extractCache.delete(sourcePath);
+        }
+      }
+    }
 
     let fromAbs = null;
     let tmpDirToClean = null;
@@ -1342,6 +1410,126 @@ async function runSmokeTest() {
           uiOk.error || `重置前:${uiOk.before} 改后:${uiOk.changed} 重置后:${uiOk.after}`);
       } catch (e) {
         check('params-reset-refresh', false, String(e && e.message || e));
+      }
+
+      // 6.10 场景压缩包预览：场景 Tab 单击 zip → 提取浏览 → 自动加载第一个 PMX（问题3回归）
+      try {
+        const uiOk = await mainWindow.webContents.executeJavaScript(`
+          (async () => {
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            const sce = document.querySelector('.lib-card[data-tab="scenes"]');
+            if (!sce) return { error: '无场景入口' };
+            sce.click();
+            await wait(800);
+            const rows = [...document.querySelectorAll('#scene-tree .win10-row')];
+            const zipRow = rows.find((r) => /\.zip$/i.test(r.dataset.name || ''));
+            if (!zipRow) return { error: '场景树无 zip 行, rows=' + rows.length };
+            zipRow.click();
+            await wait(4000);
+            const dlg = document.getElementById('archive-preview');
+            const visible = dlg && !dlg.classList.contains('hidden');
+            const status = document.querySelector('#status-text')?.textContent || '';
+            if (!visible) return { error: '清单对话框未弹出, status=' + status };
+            const extBtn = document.getElementById('ap-extract');
+            if (!extBtn) return { error: '无提取浏览按钮' };
+            extBtn.click();
+            await wait(45000);
+            const st = document.querySelector('#status-text')?.textContent || '';
+            const sd = document.querySelector('#status-detail')?.textContent || '';
+            await wait(2000);
+            const state = window.__mmdTest && window.__mmdTest.getState ? window.__mmdTest.getState() : null;
+            return { afterStatus: st, detail: sd, state };
+          })()
+        `);
+        const ok = uiOk && !uiOk.error && /已加载/.test(uiOk.afterStatus || '');
+        check('scene-zip-extract-load', ok,
+          uiOk.error || `状态栏:「${uiOk.afterStatus}」 tex:${uiOk.state && uiOk.state.texLoaded}/${uiOk.state && uiOk.state.texTotal} mesh:${uiOk.state && uiOk.state.meshCount}`);
+      } catch (e) {
+        check('scene-zip-extract-load', false, String(e && e.message || e));
+      }
+
+      // 6.11 整包缓存验证：缓存场景压缩包 → cache/models 下生成整包目录（含 Tex/AONMPB 贴图）→ 加载缓存模型贴图齐全（问题2回归）
+      try {
+        const sceneZip = archives.find((a) => /\.zip$/i.test(a) && /场景/i.test(a)) || archives.find((a) => /\.zip$/i.test(a));
+        if (!sceneZip) {
+          check('cache-whole-package', false, '未找到场景 zip 压缩包');
+        } else {
+          const uiOk = await mainWindow.webContents.executeJavaScript(`
+            (async () => {
+              const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+              const [d] = await Promise.all([window.mmdAPI.getDefaultRoot()]);
+              const roots = d && d.data ? [d.data] : [];
+              const scan = await new Promise((resolve) => {
+                const timer = setTimeout(() => resolve({ error: 'scan timeout 120s' }), 120000);
+                window.mmdAPI.onScanDone((p) => { clearTimeout(timer); resolve(p); });
+                window.mmdAPI.startResourceScan({ roots, intoArchives: true }).catch((e) => {
+                  clearTimeout(timer); resolve({ error: 'startResourceScan: ' + String(e && e.message || e) });
+                });
+              });
+              if (scan.error || !Array.isArray(scan.candidates)) return { error: scan.error || 'scan 无候选' };
+              const cands = scan.candidates.filter((c) => c.sourceType === 'archive' && c.type === 'model' && c.sourcePath === ${JSON.stringify(sceneZip)});
+              if (!cands.length) return { error: '未找到 zip 的模型候选, total=' + scan.candidates.length };
+              const target = cands[0];
+              const done = await new Promise((resolve) => {
+                const timer = setTimeout(() => resolve({ error: 'cache timeout 240s' }), 240000);
+                window.mmdAPI.onCacheDone((p) => { clearTimeout(timer); resolve(p); });
+                window.mmdAPI.cacheSelectedResources({ taskId: 'smoke_whole_pkg', ids: [target.id] }).catch((e) => {
+                  clearTimeout(timer); resolve({ error: 'cacheSelectedResources: ' + String(e && e.message || e) });
+                });
+              });
+              if (done.error) return { error: done.error };
+               const idx = await window.mmdAPI.getCacheIndex();
+               const item = ((idx && idx.index && idx.index.items) || []).find((it) => it.id === target.id);
+               return { target, done, item };
+            })()
+          `);
+          const cacheRoot = path.join(app.getPath('userData'), 'cache');
+          let dirOk = false, dirInfo = '';
+          if (uiOk && !uiOk.error && uiOk.item && uiOk.item.srcDir) {
+            const absDir = path.join(cacheRoot, String(uiOk.item.srcDir).replace(/^models[/\\]/, 'models/'));
+            try {
+              const names = fs.readdirSync(absDir);
+              const hasPmx = names.some((f) => /\.pmx$/i.test(f));
+              const hasTex = names.some((f) => /^(tex|aonmpb)$/i.test(f));
+              dirOk = hasPmx && hasTex;
+              dirInfo = `目录 ${uiOk.item.srcDir}: ${names.length} 项, pmx=${hasPmx}, 贴图目录=${hasTex}`;
+            } catch (e) {
+              dirInfo = '目录检查异常: ' + String(e && e.message || e);
+            }
+          } else {
+            dirInfo = uiOk && uiOk.error ? uiOk.error : '未生成 srcDir 缓存项';
+          }
+          check('cache-whole-package', dirOk, dirInfo);
+          // 加载整包缓存模型，验证贴图齐全
+          if (uiOk && !uiOk.error && uiOk.item && uiOk.item.srcDir) {
+            try {
+              const loadOk = await mainWindow.webContents.executeJavaScript(`
+                (async () => {
+                  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+                  const tab = document.querySelector('#info-panel .tab-btn[data-tab="cache"]');
+                  if (tab) tab.click();
+                  await wait(1000);
+                  const rows = [...document.querySelectorAll('.cache-rows .cache-row')];
+                  const row = rows.find((r) => (r.textContent || '').includes(${JSON.stringify(String(uiOk.target.name))}));
+                  if (!row) return { error: '缓存列表未找到 ' + ${JSON.stringify(String(uiOk.target.name))} };
+                  row.querySelector('.cc-load').click();
+                  await wait(8000);
+                  const st = document.querySelector('#status-text')?.textContent || '';
+                  const state = window.__mmdTest && window.__mmdTest.getState ? window.__mmdTest.getState() : null;
+                  return { status: st, texLoaded: state && state.texLoaded, texTotal: state && state.texTotal, meshCount: state && state.meshCount };
+                })()
+              `);
+              const ok2 = loadOk && !loadOk.error && /已加载/.test(loadOk.status || '')
+                && Number(loadOk.texTotal) > 0 && Number(loadOk.texLoaded) === Number(loadOk.texTotal);
+              check('load-cached-whole-package', ok2,
+                loadOk.error || `状态栏:「${loadOk.status}」 tex:${loadOk.texLoaded}/${loadOk.texTotal} mesh:${loadOk.meshCount}`);
+            } catch (e) {
+              check('load-cached-whole-package', false, String(e && e.message || e));
+            }
+          }
+        }
+      } catch (e) {
+        check('cache-whole-package', false, String(e && e.message || e));
       }
     }
   } catch (err) {

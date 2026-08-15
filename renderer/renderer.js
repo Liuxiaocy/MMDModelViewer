@@ -104,7 +104,7 @@ const DEFAULT_PARAMS = {
     autoDisableHeavy: { t: 'switch', v: true,  label: '刚体>200自动关闭物理' },
   },
   ik: {
-    enabled:          { t: 'switch', v: true,  label: 'IK 求解（下肢/手臂）', hint: '加载新模型/切动作时生效' },
+    enabled:          { t: 'switch', v: false, label: 'IK 求解（下肢/手臂）', hint: '加载新模型/切动作时生效' },
     iteration:        { t: 'range',  v: 50,    label: 'IK 迭代次数',  min: 1, max: 200, step: 1 },
     toleranceAngle:   { t: 'range',  v: 0.08,  label: 'IK 收敛角(rad)', min: 0.001, max: 0.5, step: 0.001 },
   },
@@ -345,7 +345,7 @@ function syncIkSolverForMesh(mesh) {
   if (!ikSolver || !Array.isArray(ikSolver.iks)) return;
   const iter = Math.max(1, Math.floor(Number(getParam('ik', 'iteration', 50)) || 1));
   const tol = Math.max(0, Number(getParam('ik', 'toleranceAngle', 0.08)) || 0);
-  const ikEnabled = !!getParam('ik', 'enabled', true);
+  const ikEnabled = !!getParam('ik', 'enabled', false);
   ikSolver.iks.forEach((ik) => {
     ik.iteration = iter;
     ik.minAngle = tol;
@@ -1645,6 +1645,7 @@ function renderMotionList() {
 const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
+  window.__renderFrames = (window.__renderFrames || 0) + 1;
   const delta = clock.getDelta();
   const speed = parseFloat(speedRange.value || '1');
   // 无动作也要跑 helper.update(0)：物理（布料）继续惯性摆动 ~0.3s
@@ -2658,5 +2659,55 @@ window.__mmdTest = {
       out.step1 = { error: String(e && e.message || e) };
     }
     return out;
+  },
+  // 当前 3D 视口状态（诊断用）：网格数、贴图加载情况、相机位置、渲染帧计数、渲染像素亮度
+  getState: () => {
+    const meshes = [];
+    let texLoaded = 0;
+    let texTotal = 0;
+    scene.traverse((c) => {
+      if (!c.isMesh) return;
+      meshes.push(c.name || '?');
+      const mats = Array.isArray(c.material) ? c.material : [c.material];
+      mats.forEach((m) => {
+        if (!m) return;
+        ['map', 'normalMap', 'specularMap', 'emissiveMap', 'alphaMap'].forEach((k) => {
+          const t = m[k];
+          if (!t) return;
+          texTotal++;
+          if (t.image && (t.image.complete || t.image.width > 0)) texLoaded++;
+        });
+      });
+    });
+    let pixel = null;
+    try {
+      const off = document.createElement('canvas');
+      off.width = 240; off.height = 240;
+      const r = new THREE.WebGLRenderer({ canvas: off, preserveDrawingBuffer: true, alpha: false });
+      r.setClearColor(0x888888, 1);
+      r.render(scene, camera);
+      const ctx = off.getContext('2d');
+      const d = ctx.getImageData(0, 0, off.width, off.height).data;
+      let sum = 0, nonGray = 0, n = off.width * off.height;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = (d[i] + d[i + 1] + d[i + 2]) / 3;
+        sum += lum;
+        if (Math.abs(lum - 136) > 24) nonGray++;
+      }
+      pixel = { avgLum: (sum / n).toFixed(1), nonGrayRatio: (nonGray / n * 100).toFixed(1) };
+      r.dispose();
+    } catch (e) {
+      pixel = { error: String(e && e.message || e) };
+    }
+    return {
+      currentModel: currentModel ? currentModel.name : null,
+      meshCount: meshes.length,
+      meshNames: meshes.slice(0, 5),
+      texLoaded,
+      texTotal,
+      camPos: camera.position.toArray().map((n) => n.toFixed(1)),
+      frames: window.__renderFrames || 0,
+      pixel,
+    };
   },
 };

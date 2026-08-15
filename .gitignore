@@ -8,6 +8,7 @@ renderer/bundle.js
 renderer/bundle.js.map
 smoke-result.json
 smoke-out.txt
+.smoke-userdata/
 *.log
 
 # 本地技能部署（按项目手动复制，不入库）
