@@ -16,6 +16,10 @@
       <button id="btn-open-archive" class="btn" title="导入压缩包并自动解压">🗜️ 导入压缩包…</button>
       <button id="btn-choose-dir" class="btn" title="浏览目录">📁 浏览目录…</button>
       <button id="btn-refresh" class="btn" title="刷新当前目录">刷新</button>
+      <label class="switch toolbar-switch" title="自动识别模型与动作资源并缓存到本地">
+        <input id="tgl-auto-cache" type="checkbox">
+        <span>⚙ 自动识别缓存</span>
+      </label>
       <span id="root-path" class="root-path"></span>
       <span class="spacer"></span>
       <button id="btn-reset-view" class="btn" title="重置视角">重置视角</button>
@@ -125,9 +129,64 @@
 
       <!-- 右侧信息栏 -->
       <aside id="info-panel">
-        <div class="panel-title">模型信息</div>
-        <div id="model-info" class="model-info">
-          <div class="placeholder">点击「选择模型」或在左侧选文件开始预览</div>
+        <div class="tab-bar" role="tablist">
+          <button class="tab-btn active" data-tab="info"   role="tab" aria-selected="true">模型信息</button>
+          <button class="tab-btn"        data-tab="params" role="tab" aria-selected="false">参数面板</button>
+          <button class="tab-btn"        data-tab="cache"  role="tab" aria-selected="false">缓存资源</button>
+        </div>
+
+        <div class="tab-content" data-view="info">
+          <div class="panel-title">模型信息</div>
+          <div id="model-info" class="model-info">
+            <div class="placeholder">点击「选择模型」或在左侧选文件开始预览</div>
+          </div>
+        </div>
+
+        <div class="tab-content hidden" data-view="params">
+          <div class="panel-title">参数面板</div>
+          <div id="params-render"  class="param-group" data-group="render">
+            <div class="group-title">🎨 渲染</div>
+            <div class="group-rows"></div>
+          </div>
+          <div id="params-physics" class="param-group" data-group="physics">
+            <div class="group-title">🪶 物理</div>
+            <div class="group-rows"></div>
+          </div>
+          <div id="params-ik"      class="param-group" data-group="ik">
+            <div class="group-title">🦵 IK</div>
+            <div class="group-rows"></div>
+          </div>
+          <div id="params-anim"    class="param-group" data-group="anim">
+            <div class="group-title">🎬 动画</div>
+            <div class="group-rows"></div>
+          </div>
+          <div class="param-actions">
+            <button id="btn-reset-group" class="btn btn-small">重置当前组</button>
+            <button id="btn-reset-all"   class="btn btn-small">重置全部</button>
+          </div>
+        </div>
+
+        <div class="tab-content hidden" data-view="cache">
+          <div class="panel-title">
+            缓存资源
+            <span id="cache-size" class="badge-muted">计算中…</span>
+          </div>
+          <div class="cache-toolbar">
+            <input id="cache-filter" class="filter-input" placeholder="搜索名称…" />
+            <div class="segmented" role="group">
+              <button class="seg active" data-cache-type="all">全部</button>
+              <button class="seg"        data-cache-type="models">🧊 模型</button>
+              <button class="seg"        data-cache-type="motions">🎬 动作</button>
+            </div>
+            <div class="cache-actions">
+              <button id="btn-clear-model-cache"  class="btn btn-small">清空模型缓存</button>
+              <button id="btn-clear-motion-cache" class="btn btn-small">清空动作缓存</button>
+              <button id="btn-clear-all-cache"    class="btn btn-small btn-danger">一键清空</button>
+            </div>
+          </div>
+          <div id="cache-grid" class="cache-grid">
+            <div class="placeholder">暂无缓存。打开工具栏「自动识别缓存」开关开始扫描。</div>
+          </div>
         </div>
       </aside>
     </div>
