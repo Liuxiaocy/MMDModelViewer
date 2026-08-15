@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('mmdAPI', {
   listArchiveContents: (archivePath) => ipcRenderer.invoke('list-archive-contents', archivePath),
   /** 弹出目录选择框 */
   chooseDir: () => ipcRenderer.invoke('choose-dir'),
+  /** 原生文件选择对话框（选模型/压缩包/动作文件） */
+  showOpenDialog: (opts) => ipcRenderer.invoke('show-open-dialog', opts),
   /** 保存截图 dataURL 到磁盘 */
   saveScreenshot: (dataUrl, defaultName) => ipcRenderer.invoke('save-screenshot', dataUrl, defaultName),
   /** 默认模型根目录 */

@@ -43,7 +43,7 @@ function createWindow() {
     height: 900,
     minWidth: 1000,
     minHeight: 640,
-    backgroundColor: '#1e1f26',
+    backgroundColor: '#F7F8FB',
     title: 'MMDModelViewer - 本地3D模型预览器',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -300,6 +300,22 @@ function registerIpc() {
     });
     if (res.canceled || !res.filePaths.length) return { ok: false, error: 'cancelled' };
     return { ok: true, data: res.filePaths[0] };
+  });
+
+  // 原生文件选择对话框（选模型/压缩包/动作文件）
+  ipcMain.handle('show-open-dialog', async (_evt, opts) => {
+    const filters = (opts && opts.filters) || [
+      { name: '模型/压缩包', extensions: ['pmx', 'pmd', 'vmd', 'vpd', 'zip', '7z', 'rar', 'tar', 'gz', 'xz'] },
+      { name: '所有文件', extensions: ['*'] },
+    ];
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: (opts && opts.title) || '选择文件',
+      properties: (opts && opts.properties) || ['openFile'],
+      filters,
+      defaultPath: (opts && opts.defaultPath) || DEFAULT_ROOT,
+    });
+    if (res.canceled || !res.filePaths.length) return { ok: false, error: 'cancelled' };
+    return { ok: true, data: res.filePaths };
   });
 
   ipcMain.handle('save-screenshot', async (_evt, dataUrl, defaultName) => {

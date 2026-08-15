@@ -9,11 +9,13 @@
 </head>
 <body>
   <div id="app">
-    <!-- 顶部工具栏 -->
+    <!-- 顶部玻璃工具栏 -->
     <header id="toolbar">
       <span class="app-title">MMD 模型预览器</span>
-      <button id="btn-refresh" class="btn" title="重新扫描当前目录">刷新</button>
-      <button id="btn-choose-dir" class="btn" title="选择其他模型目录">选择目录…</button>
+      <button id="btn-open-model" class="btn btn-primary" title="选择模型/压缩包文件">📂 选择模型…</button>
+      <button id="btn-open-archive" class="btn" title="导入压缩包并自动解压">🗜️ 导入压缩包…</button>
+      <button id="btn-choose-dir" class="btn" title="浏览目录">📁 浏览目录…</button>
+      <button id="btn-refresh" class="btn" title="刷新当前目录">刷新</button>
       <span id="root-path" class="root-path"></span>
       <span class="spacer"></span>
       <button id="btn-reset-view" class="btn" title="重置视角">重置视角</button>
@@ -21,14 +23,28 @@
     </header>
 
     <div id="main">
-      <!-- 左侧面板（tab：模型库 / 动作库） -->
+      <!-- 左侧面板 -->
       <aside id="sidebar">
-        <div class="side-tabs">
-          <button class="side-tab active" data-tab="models">🧊 模型库</button>
-          <button class="side-tab" data-tab="motions">🎬 动作库</button>
+        <!-- 库入口卡片 -->
+        <div class="library-cards">
+          <div class="lib-card active" id="lib-models" data-tab="models">
+            <div class="lc-icon">🧊</div>
+            <div class="lc-title">模型库</div>
+            <div class="lc-count" id="lib-models-count">—</div>
+          </div>
+          <div class="lib-card" id="lib-motions" data-tab="motions">
+            <div class="lc-icon">🎬</div>
+            <div class="lc-title">动作库</div>
+            <div class="lc-count" id="lib-motions-count">—</div>
+          </div>
+          <div class="lib-card" id="lib-recent" data-tab="recent">
+            <div class="lc-icon">🕘</div>
+            <div class="lc-title">最近</div>
+            <div class="lc-count" id="lib-recent-count">—</div>
+          </div>
         </div>
 
-        <!-- 面包屑导航（返回/前进 + 路径） -->
+        <!-- 面包屑导航 -->
         <div class="breadcrumb-bar">
           <div class="nav-btns">
             <button id="btn-back" class="btn-icon" title="返回上一级（Alt+←）" disabled>◀</button>
@@ -41,7 +57,7 @@
           </div>
         </div>
 
-        <!-- 两个视图：模型库（文件树） / 动作库（列表+筛选） -->
+        <!-- 三个视图：模型库（文件树）/ 动作库 / 最近加载 -->
         <div class="side-views">
           <div class="side-view" data-view="models">
             <div class="panel-title-small">文件目录</div>
@@ -56,6 +72,12 @@
               <div class="placeholder">扫描中…</div>
             </div>
           </div>
+          <div class="side-view hidden" data-view="recent">
+            <div class="panel-title-small">最近加载</div>
+            <div id="recent-list" class="motion-list">
+              <div class="placeholder">暂无记录</div>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -64,7 +86,7 @@
         <canvas id="gl-canvas"></canvas>
         <div id="view-hint" class="view-hint">左键旋转 · 右键平移 · 滚轮缩放 · 双击模型重置视角</div>
 
-        <!-- 快速预览卡：悬停/选中文件时出现（文件信息、动作预览等） -->
+        <!-- 快速预览卡 -->
         <div id="preview-card" class="preview-card hidden">
           <div class="pc-header">
             <span id="pc-title" class="pc-title">—</span>
@@ -73,7 +95,7 @@
           <div id="pc-body" class="pc-body"></div>
         </div>
 
-        <!-- 压缩包内容预览浮层（不解压即可查看条目） -->
+        <!-- 压缩包内容预览浮层 -->
         <div id="archive-preview" class="preview-card hidden">
           <div class="pc-header">
             <span id="ap-title" class="pc-title">压缩包内容</span>
@@ -105,7 +127,7 @@
       <aside id="info-panel">
         <div class="panel-title">模型信息</div>
         <div id="model-info" class="model-info">
-          <div class="placeholder">在左侧选择模型文件开始预览</div>
+          <div class="placeholder">点击「选择模型」或在左侧选文件开始预览</div>
         </div>
       </aside>
     </div>
