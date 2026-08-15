@@ -160,13 +160,43 @@ function applyParam(group, key, value, prev) {
     }
     if (key === 'bgColor') { try { scene.background = new THREE.Color(String(value)); } catch (_) {} }
     if (key === 'gridVisible') { try { gridHelper.visible = !!value; } catch (_) {} }
-    if (key === 'shadowSoftness') { /* TODO Task 10: 根据 value 切 PCFSoft / VSM / PCF */ }
-    if (key === 'outlineEnabled' || key === 'edgeStrength' || key === 'edgeThickness' || key === 'edgeColor' || key === 'fxaaEnabled') {
-      /* TODO Task 10: outlinePass.uniforms / FXAA 开关 / composer 的 pass 顺序 */
+    if (key === 'shadowSoftness') {
+      try {
+        const v = Number(value) || 0;
+        if (v <= 0.25) renderer.shadowMap.type = THREE.BasicShadowMap;
+        else if (v <= 0.75) renderer.shadowMap.type = THREE.PCFShadowMap;
+        else if (v <= 1.25) renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        else renderer.shadowMap.type = THREE.VSMShadowMap;
+        if (currentMesh) currentMesh.traverse && currentMesh.traverse((c) => {
+          if (c && c.isMesh && c.material) {
+            const mats = Array.isArray(c.material) ? c.material : [c.material];
+            mats.forEach((m) => { m.needsUpdate = true; });
+          }
+        });
+      } catch (_) { /* noop */ }
     }
-    if (key === 'ambientIntensity' || key === 'dirIntensity' || key === 'fillIntensity') {
-      /* TODO Task 10: 为 ambientLight / dirLight / fillLight 引用建立常量后赋值 */
+    const postfx = window.__postfx;
+    if (postfx) {
+      if (key === 'outlineEnabled') {
+        if (postfx.outlinePass) {
+          postfx.outlinePass.enabled = !!value;
+          refreshOutlineSelection();
+        }
+      }
+      if (key === 'edgeStrength' && postfx.outlinePass) postfx.outlinePass.edgeStrength = Number(value) || 0;
+      if (key === 'edgeThickness' && postfx.outlinePass) postfx.outlinePass.edgeThickness = Number(value) || 0;
+      if (key === 'edgeColor' && postfx.outlinePass) {
+        try {
+          const c = new THREE.Color(String(value));
+          postfx.outlinePass.visibleEdgeColor.copy(c);
+          postfx.outlinePass.hiddenEdgeColor.copy(c).multiplyScalar(0.15);
+        } catch (_) { /* noop */ }
+      }
+      if (key === 'fxaaEnabled' && postfx.fxaaPass) postfx.fxaaPass.enabled = !!value;
     }
+    if (key === 'ambientIntensity') { if (typeof ambientLight !== 'undefined') { ambientLight.intensity = Number(value) || 0; } }
+    if (key === 'dirIntensity')     { if (typeof dirLight !== 'undefined')     { dirLight.intensity = Number(value) || 0; } }
+    if (key === 'fillIntensity')    { if (typeof fillLight !== 'undefined')    { fillLight.intensity = Number(value) || 0; } }
   } else if (group === 'physics' || group === 'ik') {
   } else if (group === 'anim') {
     if (key === 'speedScale') {
@@ -179,6 +209,14 @@ function applyParam(group, key, value, prev) {
     if (key === 'resetOnStop') { /* TODO Task 11: btn-stop 行为开关 */ }
     if (key === 'afterglow') { /* TODO Task 11: 重建 MMDAnimationHelper({ afterglow }) */ }
   }
+}
+function refreshOutlineSelection() {
+  if (!window.__postfx || !window.__postfx.outlinePass) return;
+  const sel = [];
+  if (currentMesh && currentMesh.traverse) {
+    currentMesh.traverse((c) => { if (c && c.isMesh) sel.push(c); });
+  }
+  window.__postfx.outlinePass.selectedObjects = sel;
 }
 function resetParamGroup(groupName) {
   const defaults = flattenParams(DEFAULT_PARAMS);
@@ -1203,13 +1241,9 @@ async function loadModel(node) {
     });
     currentModel = mesh;
     currentMesh = mesh;
-    // 更新轮廓描边所选对象（包含所有子网格）—— Task 10 会封装为统一方法
-    if (window.__postfx && window.__postfx.outlinePass) {
-      const sel = [];
-      mesh.traverse && mesh.traverse((c) => { if (c && c.isMesh) sel.push(c); });
-      window.__postfx.outlinePass.selectedObjects = sel;
-    }
     scene.add(mesh);
+    // 刷新 OutlinePass 所选对象（稳定边缘 + 描边）
+    refreshOutlineSelection();
 
     // ====== 交给 MMDAnimationHelper 统一驱动（IK + 物理 + 动画） ======
     if (!mmdHelper) {
@@ -1497,6 +1531,7 @@ $('btn-stop').addEventListener('click', () => {
     });
   }
   currentAnimating = false;
+  refreshOutlineSelection();
   vmdListEl.querySelectorAll('.vmd-item').forEach((i) => i.classList.remove('active'));
 });
 speedRange.addEventListener('input', () => { speedVal.textContent = parseFloat(speedRange.value).toFixed(1) + 'x'; });
