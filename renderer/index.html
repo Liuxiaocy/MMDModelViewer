@@ -41,6 +41,11 @@
             <div class="lc-title">动作库</div>
             <div class="lc-count" id="lib-motions-count">—</div>
           </div>
+          <div class="lib-card" id="lib-scenes" data-tab="scenes">
+            <div class="lc-icon">🌆</div>
+            <div class="lc-title">场景</div>
+            <div class="lc-count" id="lib-scenes-count">—</div>
+          </div>
           <div class="lib-card" id="lib-recent" data-tab="recent">
             <div class="lc-icon">🕘</div>
             <div class="lc-title">最近</div>
@@ -73,6 +78,12 @@
               <input id="motion-filter" class="filter-input" type="text" placeholder="搜索动作…" />
             </div>
             <div id="motion-list" class="motion-list">
+              <div class="placeholder">扫描中…</div>
+            </div>
+          </div>
+          <div class="side-view hidden" data-view="scenes">
+            <div class="panel-title-small">场景目录</div>
+            <div id="scene-tree" class="scene-tree">
               <div class="placeholder">扫描中…</div>
             </div>
           </div>
@@ -173,18 +184,20 @@
           </div>
           <div class="cache-toolbar">
             <input id="cache-filter" class="filter-input" placeholder="搜索名称…" />
-            <div class="segmented" role="group">
-              <button class="seg active" data-cache-type="all">全部</button>
-              <button class="seg"        data-cache-type="models">🧊 模型</button>
-              <button class="seg"        data-cache-type="motions">🎬 动作</button>
-            </div>
-            <div class="cache-actions">
-              <button id="btn-clear-model-cache"  class="btn btn-small">清空模型缓存</button>
-              <button id="btn-clear-motion-cache" class="btn btn-small">清空动作缓存</button>
-              <button id="btn-clear-all-cache"    class="btn btn-small btn-danger">一键清空</button>
+            <div class="cache-toolbar-row">
+              <div class="segmented" role="group">
+                <button class="seg active" data-cache-type="all">全部</button>
+                <button class="seg"        data-cache-type="models">🧊 模型</button>
+                <button class="seg"        data-cache-type="motions">🎬 动作</button>
+              </div>
+              <div class="cache-actions">
+                <button id="btn-clear-model-cache"  class="btn btn-small">清空模型缓存</button>
+                <button id="btn-clear-motion-cache" class="btn btn-small">清空动作缓存</button>
+                <button id="btn-clear-all-cache"    class="btn btn-small btn-danger">一键清空</button>
+              </div>
             </div>
           </div>
-          <div id="cache-grid" class="cache-grid">
+          <div id="cache-grid" class="cache-rows">
             <div class="placeholder">暂无缓存。打开工具栏「自动识别缓存」开关开始扫描。</div>
           </div>
         </div>

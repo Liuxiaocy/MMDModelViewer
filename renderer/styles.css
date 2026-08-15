@@ -357,6 +357,7 @@ body {
   letter-spacing: 0.4px;
 }
 .file-tree { flex: 1; overflow: auto; padding: 6px 4px; }
+.scene-tree { flex: 1; overflow: auto; padding: 6px 4px; }
 .motion-list { flex: 1; overflow: auto; padding: 8px; }
 
 /* 动作列表条目 */
@@ -950,14 +951,20 @@ body {
 /* ------ 缓存资源 Tab ------ */
 .cache-toolbar {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
   margin-bottom: 12px;
 }
 .cache-toolbar > .filter-input {
   width: 100%;
-  order: -999;
+  flex: 1 1 auto;
+  margin-left: 0;
+}
+.cache-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 .segmented {
   display: inline-flex;
@@ -965,12 +972,13 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   overflow: hidden;
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
 }
 .seg {
-  flex: 1;
-  padding: 4px 8px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 4px 6px;
   font-size: 11px;
   line-height: 1.4;
   font-weight: 500;
@@ -982,6 +990,8 @@ body {
   transition: all var(--t-fast);
   font-family: inherit;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .seg:last-child { border-right: none; }
 .seg:hover { color: var(--text); background: var(--bg-hover); }
@@ -994,14 +1004,11 @@ body {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
-  width: 100%;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
-.cache-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
-  gap: 10px;
-}
+/* 候选清单卡片（modal 内勾选缓存项用） */
 .cache-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -1010,70 +1017,43 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  transition: all var(--t-fast);
   cursor: pointer;
 }
-.cache-card:hover {
-  border-color: var(--accent-border);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
-  background: #fff;
-}
-.cache-thumb {
-  aspect-ratio: 4 / 3;
-  background: var(--bg-hover);
-  border-radius: var(--r-md);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 28px;
-  color: var(--text-dim);
-  flex-shrink: 0;
-}
-.cache-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.cache-meta {
+.cache-card:hover { border-color: var(--accent-border); }
+.cache-card.cached-disabled { opacity: 0.45; }
+
+/* 缓存行式列表（资源名 / 类型 / 大小，名称超长省略） */
+.cache-rows {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 0;
 }
-.cache-name {
-  font-weight: 600;
+.cache-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 42px 40px 64px auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 30px;
+  cursor: pointer;
   font-size: 12px;
-  line-height: 1.35;
   color: var(--text);
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast);
+}
+.cache-row:hover { background: #E5F3FF; }
+.cr-icon { text-align: center; font-size: 14px; }
+.cr-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
-.cache-sub {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-muted);
-}
-.cache-sub .tag-small {
-  padding: 0 6px;
-  border-radius: var(--r-full);
-  font-size: 10px;
-  background: var(--accent-light);
-  color: var(--accent);
-  font-weight: 600;
-}
-.cache-sub .tag-small.motion { background: var(--accent-2-light); color: var(--accent-2); }
-.cache-btns {
-  display: flex;
-  gap: 4px;
-}
-.cache-btns .btn { flex: 1; font-size: 11px; padding: 4px 6px; }
+.cr-ext { font-size: 10px; color: var(--text-muted); text-align: center; white-space: nowrap; }
+.cr-type { font-size: 11px; color: var(--text-muted); text-align: center; white-space: nowrap; }
+.cr-size { font-size: 11px; color: #666; text-align: right; white-space: nowrap; }
+.cr-actions { display: flex; gap: 4px; justify-content: flex-end; white-space: nowrap; }
+.cr-actions .btn { padding: 2px 8px; font-size: 11px; }
 
 /* ------ 进度条 ------ */
 .progress-track {

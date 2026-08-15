@@ -18,6 +18,7 @@ const ARCHIVE_RE = /\.(zip|7z|rar|tar|gz|xz|tgz|txz)$/i;
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
 const fileTreeEl = $('file-tree');
+const sceneTreeEl = $('scene-tree');
 const modelInfoEl = $('model-info');
 const statusText = $('status-text');
 const statusDetail = $('status-detail');
@@ -50,6 +51,8 @@ const apExtract = $('ap-extract');
 const navStack = { back: [], forward: [] };
 let defaultRootPath = null;
 let motionRootPath = null;
+let sceneRootPath = null;
+let sceneRoot = null;
 let activeTab = 'models';
 let lastArchivePreviewPath = null;
 
@@ -541,7 +544,8 @@ function goForward() {
   navigateTo(nxt.path, nxt.tab, false);
 }
 function goUp() {
-  const base = activeTab === 'motions' ? (motionRootPath || '') : (defaultRootPath || '');
+  const base = activeTab === 'motions' ? (motionRootPath || '')
+    : activeTab === 'scenes' ? (sceneRootPath || '') : (defaultRootPath || '');
   const curPath = navStack.back[navStack.back.length - 1]?.path || '';
   if (!curPath) return;
   if (curPath === base || isSamePath(parentPath(curPath), base)) {
@@ -552,7 +556,8 @@ function goUp() {
   if (parent && parent !== curPath) navigateTo(parent, activeTab, true);
 }
 function goHome() {
-  const root = activeTab === 'motions' ? (motionRootPath || defaultRootPath) : defaultRootPath;
+  const root = activeTab === 'motions' ? (motionRootPath || defaultRootPath)
+    : activeTab === 'scenes' ? (sceneRootPath || defaultRootPath) : defaultRootPath;
   if (root) navigateTo(root, activeTab, true);
 }
 function parentPath(p) {
@@ -571,7 +576,8 @@ function updateNavButtons() {
   btnBack.disabled = navStack.back.length < 2;
   btnForward.disabled = navStack.forward.length === 0;
   const curPath = navStack.back[navStack.back.length - 1]?.path || '';
-  const base = activeTab === 'motions' ? (motionRootPath || '') : (defaultRootPath || '');
+  const base = activeTab === 'motions' ? (motionRootPath || '')
+    : activeTab === 'scenes' ? (sceneRootPath || '') : (defaultRootPath || '');
   let canUp = false;
   if (curPath && base) {
     const normCur = curPath.replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
@@ -602,6 +608,15 @@ async function navigateTo(dirPath, tab, pushHistory = true) {
     renderMotionList();
     renderBreadcrumb(dirPath, pathPartsUnderRoot(dirPath, motionRootPath || dirPath));
     setStatus('就绪', 'info', `动作库：共 ${flat.length} 个动作文件`);
+  } else if (activeTab === 'scenes') {
+    setStatus('正在扫描场景目录…', 'info', dirPath);
+    const res = await api.scanDir(dirPath);
+    if (!res.ok) { setStatus('场景扫描失败：' + res.error, 'error'); return; }
+    sceneRoot = res.data;
+    sceneRootPath = dirPath;
+    renderTree(sceneRoot, sceneTreeEl);
+    renderBreadcrumb(dirPath, pathPartsUnderRoot(dirPath, sceneRootPath || dirPath));
+    setStatus('就绪', 'info', `${countModels(res.data)} 个场景模型`);
   } else {
     setStatus('正在加载目录…', 'info', dirPath);
     const res = await api.scanDir(dirPath);
@@ -729,6 +744,19 @@ function switchTab(tab, updateHistory = true) {
     } else {
       motionListEl.innerHTML = '<div class="placeholder">未找到动作目录</div>';
     }
+  } else if (tab === 'scenes') {
+    if (sceneRootPath) {
+      if (!sceneRoot) {
+        navigateTo(sceneRootPath, 'scenes', updateHistory);
+      } else {
+        renderTree(sceneRoot, sceneTreeEl);
+        renderBreadcrumb(sceneRootPath, pathPartsUnderRoot(sceneRootPath, sceneRootPath));
+        if (updateHistory) pushNavHistory(sceneRootPath, 'scenes');
+        updateNavButtons();
+      }
+    } else {
+      sceneTreeEl.innerHTML = '<div class="placeholder">未找到场景目录（D:\\素材\\3D模型\\场景）</div>';
+    }
   } else if (tab === 'recent') {
     renderRecentList();
     renderBreadcrumb('', []);
@@ -736,6 +764,7 @@ function switchTab(tab, updateHistory = true) {
     updateNavButtons();
   } else {
     if (currentRoot) {
+      renderTree(currentRoot); // 重绘以显示「已缓存模型」组等最新状态
       renderBreadcrumb(currentDirPath || defaultRootPath,
         pathPartsUnderRoot(currentDirPath || defaultRootPath, defaultRootPath));
       if (updateHistory) pushNavHistory(currentDirPath || defaultRootPath, 'models');
@@ -745,18 +774,41 @@ function switchTab(tab, updateHistory = true) {
 }
 
 // ---------- 目录树 (Win10 列表扁平 grid) ----------
-function renderTree(root) {
-  fileTreeEl.innerHTML = '';
+function renderTree(root, containerEl) {
+  const cont = containerEl || fileTreeEl;
+  cont.innerHTML = '';
   dirDescendants.clear();
   // 根节点本身也要一行（Win10 风格）
-  appendWin10Row(root, 0, true);
+  appendWin10Row(root, 0, true, cont);
   // root 默认展开
   if (root.children) {
-    root.children.forEach((c) => dfsAppend(c, 1, [root]));
+    root.children.forEach((c) => dfsAppend(c, 1, [root], cont));
+  }
+  // 已缓存模型组（功能：识别出的资源同步到左侧模型库）
+  if (!containerEl) {
+    const cached = (cacheState.items || []).filter((it) => it.type === 'model');
+    if (cached.length) {
+      const vdir = {
+        name: '🧊 已缓存模型',
+        path: '__cached_models__',
+        type: 'dir',
+        children: cached.map((it) => ({
+          name: it.name,
+          path: window.__cacheRootAbs
+            ? require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '')
+            : (it.name || ''),
+          type: 'model',
+          size: it.cacheSize,
+        })),
+      };
+      dfsAppend(vdir, 1, [root], cont);
+      const vrow = [...cont.querySelectorAll('.win10-row')].find((r) => r.dataset.path === '__cached_models__');
+      if (vrow) toggleDir(vrow, true);
+    }
   }
 }
-function dfsAppend(node, depth, ancestorDirs) {
-  const row = appendWin10Row(node, depth, false);
+function dfsAppend(node, depth, ancestorDirs, cont) {
+  const row = appendWin10Row(node, depth, false, cont);
   // 挂到所有祖先 dir 的后代集合（便于 toggle 时一次性显示/隐藏）
   ancestorDirs.forEach((a) => {
     const key = normalizePath(a.path || a.name);
@@ -765,7 +817,7 @@ function dfsAppend(node, depth, ancestorDirs) {
   });
   if (node.type === 'dir' && node.children && node.children.length) {
     const nextAncestors = ancestorDirs.concat([node]);
-    node.children.forEach((c) => dfsAppend(c, depth + 1, nextAncestors));
+    node.children.forEach((c) => dfsAppend(c, depth + 1, nextAncestors, cont));
     // 自己也作为后代的控制者
     const me = normalizePath(node.path || node.name);
     if (!dirDescendants.has(me)) dirDescendants.set(me, new Set());
@@ -778,7 +830,8 @@ function dfsAppend(node, depth, ancestorDirs) {
   }
 }
 function normalizePath(p) { return (p || '').replace(/\\/g, '/'); }
-function appendWin10Row(node, depth, isRoot) {
+function appendWin10Row(node, depth, isRoot, container) {
+  const cont = container || fileTreeEl;
   const row = document.createElement('div');
   row.className = 'win10-row';
   row.dataset.path = normalizePath(node.path);
@@ -820,7 +873,7 @@ function appendWin10Row(node, depth, isRoot) {
       toggleDir(row);
       showPreviewCardForNode(node);
     });
-    row.addEventListener('dblclick', (e) => { e.stopPropagation(); navigateTo(node.path, 'models', true); });
+    row.addEventListener('dblclick', (e) => { e.stopPropagation(); navigateTo(node.path, cont === sceneTreeEl ? 'scenes' : 'models', true); });
   } else {
     row.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -832,7 +885,7 @@ function appendWin10Row(node, depth, isRoot) {
     row.addEventListener('mouseleave', hidePreviewCard);
   }
 
-  fileTreeEl.appendChild(row);
+  cont.appendChild(row);
   return row;
 }
 function toggleDir(rowEl, forceExpand) {
@@ -1303,9 +1356,13 @@ function renderRecentList() {
 }
 
 function updateLibCounts() {
-  $('lib-models-count').textContent = currentRoot ? countModels(currentRoot) + ' 项' : '—';
-  $('lib-motions-count').textContent = motionRootItems.length + ' 项';
+  const cachedModels = (cacheState.items || []).filter((it) => it.type === 'model').length;
+  const cachedMotions = (cacheState.items || []).filter((it) => it.type === 'motion').length;
+  $('lib-models-count').textContent = (currentRoot ? countModels(currentRoot) : 0) + cachedModels + ' 项';
+  $('lib-motions-count').textContent = (motionRootItems.length + cachedMotions) + ' 项';
   $('lib-recent-count').textContent = recentItems.length + ' 项';
+  const sce = $('lib-scenes-count');
+  if (sce) sce.textContent = sceneRoot ? countModels(sceneRoot) + ' 项' : '—';
 }
 
 // ---------- MMD 模型加载 ----------
@@ -1513,7 +1570,13 @@ async function playVmd(vmdNode, mesh, el) {
 function renderMotionList() {
   const kw = motionFilterKw.trim().toLowerCase();
   const items = motionRootItems.filter((n) => !kw || (n.name || '').toLowerCase().includes(kw));
-  if (!items.length) {
+  // 已缓存动作组（功能：识别出的资源同步到左侧动作库）
+  const cachedMotions = (cacheState.items || []).filter((it) =>
+    it.type === 'motion' &&
+    !motionRootItems.some((n) => (n.name || '') === (it.name || '')) &&
+    (!kw || String(it.name || '').toLowerCase().includes(kw))
+  );
+  if (!items.length && !cachedMotions.length) {
     motionListEl.innerHTML = `<div class="placeholder">${motionFilterKw ? '没有匹配的动作文件' : '动作目录为空'}</div>`;
     return;
   }
@@ -1545,6 +1608,35 @@ function renderMotionList() {
     });
     el.addEventListener('mouseenter', () => showPreviewCardForNode({ path: n.path, name: n.name, size: n.size, type: 'model' }));
     el.addEventListener('mouseleave', hidePreviewCard);
+    motionListEl.appendChild(el);
+  });
+  cachedMotions.forEach((it) => {
+    const abs = window.__cacheRootAbs
+      ? require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '')
+      : '';
+    const el = document.createElement('div');
+    el.className = 'motion-item';
+    el.title = abs || String(it.name || '');
+    el.innerHTML = `
+      <div class="mi-icon">🎞️</div>
+      <div class="mi-body">
+        <div class="mi-name">${escapeHtml(String(it.name || ''))}</div>
+        <div class="mi-meta">
+          <span>${fmtSize(Number(it.cacheSize) || 0)}</span>
+          <span class="chip">已缓存</span>
+          ${currentModel && currentMesh ? '<span class="chip warn">可应用</span>' : ''}
+        </div>
+      </div>`;
+    el.addEventListener('click', () => {
+      document.querySelectorAll('.motion-item.selected').forEach((x) => x.classList.remove('selected'));
+      el.classList.add('selected');
+      if (currentModel && currentMesh) {
+        playVmd({ path: abs, name: it.name, size: it.cacheSize }, currentMesh, null);
+      } else {
+        showPreviewCardForNode({ path: abs, name: it.name, size: it.cacheSize, type: 'model' }, true);
+        setStatus('请先加载一个 PMX/PMD 模型，再应用此动作', 'warn', it.name);
+      }
+    });
     motionListEl.appendChild(el);
   });
 }
@@ -1798,10 +1890,12 @@ function syncParamValuesFromState(group) {
   const btnAll = $('btn-reset-all');
   if (btnGroup) btnGroup.addEventListener('click', () => {
     resetParamGroup(currentParamGroup);
+    syncParamValuesFromState(currentParamGroup); // 重置后立即刷新已构建的表单（Bug3）
     setStatus(`已重置参数组：${currentParamGroup}`, 'info');
   });
   if (btnAll) btnAll.addEventListener('click', () => {
     resetAllParams();
+    ['render', 'physics', 'ik', 'anim'].forEach((g) => syncParamValuesFromState(g));
     setStatus('已重置所有参数到默认值', 'info');
   });
 })();
@@ -1920,6 +2014,21 @@ async function refreshCacheItems() {
     const r = await api.getCacheIndex();
     cacheState.items = ((r && r.index && Array.isArray(r.index.items)) ? r.index.items : []).slice();
   } catch (_) { cacheState.items = []; }
+  // 预填 cacheRootAbs（缓存项拼绝对路径、缩略图 mmd:// 都需要）
+  if (!window.__cacheRootAbs && api && api.getCacheDirInfo) {
+    try {
+      const info = await api.getCacheDirInfo();
+      if (info && info.root) window.__cacheRootAbs = info.root;
+    } catch (_) { /* noop */ }
+  }
+  syncCachedToLibraries();
+}
+// 缓存变化后，把缓存资源同步到左侧模型库/动作库（功能1）
+function syncCachedToLibraries() {
+  updateLibCounts();
+  if (activeTab === 'motions') renderMotionList();
+  else if (activeTab === 'models' && currentRoot) renderTree(currentRoot);
+  else if (activeTab === 'scenes' && sceneRoot) renderTree(sceneRoot, sceneTreeEl);
 }
 function updateCacheSizeBadge() {
   const badge = $('cache-size');
@@ -1940,13 +2049,6 @@ function getFilteredCacheItems() {
     }
     return true;
   });
-}
-function cacheThumbUrl(it) {
-  // it.thumb 形如 thumbs/xxx.png，拼接为 mmd://local/<cacheRoot>/thumbs/xxx.png
-  if (!it || !it.thumb) return null;
-  return api && typeof api.mmdUrl === 'function' && window.__cacheRootAbs
-    ? api.mmdUrl(require_path_join_fallback(window.__cacheRootAbs, String(it.thumb)))
-    : null;
 }
 // 简化 path.join：因为 mmdUrl 只要 / 分隔；跨盘符场景交由 mmdUrl 处理
 function require_path_join_fallback(a, b) {
@@ -2225,27 +2327,23 @@ async function renderCacheTab() {
   }
   grid.innerHTML = '';
   filtered.forEach((it) => {
-    const card = document.createElement('div');
-    card.className = 'cache-card';
     const isModel = it.type === 'model';
-    const thumb = cacheThumbUrl(it);
-    card.innerHTML = `
-      <div class="cc-thumb" data-abs="${it.cachePath ? String(it.cachePath) : ''}">
-        ${thumb
-          ? `<img src="${thumb}" alt="${escapeHtml(String(it.name || ''))}" onerror="this.remove(); this.parentElement.innerHTML='<div class=\\'cc-emoji\\'>${isModel ? '🧊' : '🎬'}</div>';" />`
-          : `<div class="cc-emoji">${isModel ? '🧊' : '🎬'}</div>`}
-      </div>
-      <div class="cc-name" title="${escapeHtml(String(it.name || ''))}">${escapeHtml(String(it.name || ''))}</div>
-      <div class="cc-meta">
-        <span>${String(it.ext || '').toUpperCase()}</span>
-        <span>${fmtSize(Number(it.cacheSize) || 0)}</span>
-      </div>
-      <div class="cc-actions">
+    const row = document.createElement('div');
+    row.className = 'cache-row';
+    row.title = String(it.name || '');
+    row.innerHTML = `
+      <div class="cr-icon">${isModel ? '🧊' : '🎬'}</div>
+      <div class="cr-name">${escapeHtml(String(it.name || ''))}</div>
+      <div class="cr-ext">${String(it.ext || '').toUpperCase()}</div>
+      <div class="cr-type">${isModel ? '模型' : '动作'}</div>
+      <div class="cr-size">${fmtSize(Number(it.cacheSize) || 0)}</div>
+      <div class="cr-actions">
         <button class="btn btn-tiny cc-load">${isModel ? '加载' : '应用'}</button>
         <button class="btn btn-tiny btn-danger cc-del">删除</button>
       </div>`;
     // 加载/应用：缓存项用相对路径拼 cacheRoot 取模型/动作的绝对路径
-    card.querySelector('.cc-load').addEventListener('click', () => {
+    // 整行点击与「加载/应用」按钮等价（修复 Bug1：原卡片主体无点击处理）
+    const doLoad = () => {
       if (!window.__cacheRootAbs) { setStatus('缓存根目录未知，请稍后再试', 'warn'); return; }
       const abs = require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '');
       if (it.type === 'model') {
@@ -2255,8 +2353,11 @@ async function renderCacheTab() {
       } else if (it.type === 'motion') {
         setStatus('请先加载一个 PMX/PMD 模型，再应用此动作', 'warn');
       }
-    });
-    card.querySelector('.cc-del').addEventListener('click', async () => {
+    };
+    row.addEventListener('click', doLoad);
+    row.querySelector('.cc-load').addEventListener('click', (e) => { e.stopPropagation(); doLoad(); });
+    row.querySelector('.cc-del').addEventListener('click', async (e) => {
+      e.stopPropagation();
       if (!api || typeof api.deleteCacheItems !== 'function') return;
       try {
         const r = await api.deleteCacheItems([it.id]);
@@ -2267,9 +2368,9 @@ async function renderCacheTab() {
         } else {
           setStatus('删除失败', 'warn');
         }
-      } catch (e) { setStatus('删除异常：' + (e && e.message || e), 'error'); }
+      } catch (err) { setStatus('删除异常：' + (err && err.message || err), 'error'); }
     });
-    grid.appendChild(card);
+    grid.appendChild(row);
   });
 }
 function renderCacheToolbar() {
@@ -2441,12 +2542,13 @@ async function init() {
   // 先启动 ammo 预加载（与扫描根目录并行，保证第一个模型加载时 ammo 已就绪）
   const ammoPromise = initAmmo();
   try {
-    const [defRes, motRes] = await Promise.all([api.getDefaultRoot(), api.getMotionRoot()]);
+    const [defRes, motRes, sceRes] = await Promise.all([api.getDefaultRoot(), api.getMotionRoot(), api.getSceneRoot()]);
     // 等 ammo 完（不会比目录扫描更慢）
     await ammoPromise;
     if (!defRes.ok || !defRes.data) { setStatus('默认根目录获取失败', 'error'); return; }
     defaultRootPath = defRes.data;
     motionRootPath = motRes.data || null;
+    sceneRootPath = sceRes && sceRes.data || null;
     navStack.back = [{ path: defaultRootPath, tab: 'models' }];
     navStack.forward = [];
     await navigateTo(defaultRootPath, 'models', false);
@@ -2461,6 +2563,10 @@ async function init() {
         })(res.data);
         motionRootItems = flat;
       }
+    }
+    if (sceneRootPath) {
+      const res = await api.scanDir(sceneRootPath);
+      if (res.ok) sceneRoot = res.data;
     }
     updateLibCounts();
     updateNavButtons();

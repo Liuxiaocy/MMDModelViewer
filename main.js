@@ -14,6 +14,7 @@ const unrar = require('node-unrar-js');
 
 const DEFAULT_ROOT = 'D:\\素材\\3D模型';
 const MOTION_ROOT = path.join(DEFAULT_ROOT, '动作');
+const SCENE_ROOT = path.join(DEFAULT_ROOT, '场景');
 
 // 支持的模型 / 压缩包 / 文本扩展名
 const MODEL_EXTS = new Set([
@@ -345,6 +346,16 @@ function registerIpc() {
     try {
       const ok = fs.existsSync(MOTION_ROOT) && fs.statSync(MOTION_ROOT).isDirectory();
       return { ok: true, data: ok ? MOTION_ROOT : null };
+    } catch (e) {
+      return { ok: true, data: null };
+    }
+  });
+
+  // 场景模型根目录（<默认根>/场景）
+  ipcMain.handle('get-scene-root', async () => {
+    try {
+      const ok = fs.existsSync(SCENE_ROOT) && fs.statSync(SCENE_ROOT).isDirectory();
+      return { ok: true, data: ok ? SCENE_ROOT : null };
     } catch (e) {
       return { ok: true, data: null };
     }
@@ -1254,6 +1265,83 @@ async function runSmokeTest() {
         check('render-screenshot', shotOk && shotOk.ok, shotOk.ok
           ? `PNG dataURL ${(shotOk.len / 1024).toFixed(0)}KB`
           : (shotOk && shotOk.error || 'no result'));
+      }
+
+      // 6.7 缓存模型加载链路：切到缓存 Tab → 点击第一个模型卡片「加载」→ 观察状态栏
+      try {
+        const uiOk = await mainWindow.webContents.executeJavaScript(`
+          (async () => {
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            const tab = document.querySelector('#info-panel .tab-btn[data-tab="cache"]');
+            if (tab) tab.click();
+            await wait(800);
+            const btn = document.querySelector('.cache-rows .cc-load');
+            if (!btn) return { error: '缓存 Tab 无加载按钮（未渲染）', status: '', detail: '' };
+            btn.click();
+            await wait(5000);
+            const st = document.querySelector('#status-text') ? document.querySelector('#status-text').textContent : '';
+            const sd = document.querySelector('#status-detail') ? document.querySelector('#status-detail').textContent : '';
+            return { status: st, detail: sd };
+          })()
+        `);
+        const ok = uiOk && !uiOk.error && /已加载/.test(uiOk.status || '');
+        check('load-cached-model', ok, uiOk.error || `状态栏:「${uiOk.status}」详情:「${uiOk.detail}」`);
+      } catch (e) {
+        check('load-cached-model', false, String(e && e.message || e));
+      }
+
+      // 6.8 场景视图渲染 + 左侧「已缓存模型」组
+      try {
+        const uiOk = await mainWindow.webContents.executeJavaScript(`
+          (async () => {
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            const sce = document.querySelector('.lib-card[data-tab="scenes"]');
+            if (!sce) return { error: '无场景入口', sceneRows: 0, groupName: '' };
+            sce.click();
+            await wait(600);
+            const sceneRows = document.querySelectorAll('#scene-tree .win10-row').length;
+            const models = document.querySelector('.lib-card[data-tab="models"]');
+            if (models) models.click();
+            await wait(600);
+            const cachedRow = document.querySelector('#file-tree .win10-row[data-path="__cached_models__"]');
+            const groupName = cachedRow ? cachedRow.querySelector('.w10-name').textContent : '';
+            return { sceneRows, groupName };
+          })()
+        `);
+        const ok = uiOk && !uiOk.error && Number(uiOk.sceneRows) > 0 && /已缓存/.test(uiOk.groupName || '');
+        check('scenes-and-cached-group', ok,
+          uiOk.error || `场景行数:${uiOk.sceneRows} 已缓存组:「${uiOk.groupName}」`);
+      } catch (e) {
+        check('scenes-and-cached-group', false, String(e && e.message || e));
+      }
+
+      // 6.9 参数面板「重置全部」后表单立即回显默认值（Bug3）
+      try {
+        const uiOk = await mainWindow.webContents.executeJavaScript(`
+          (async () => {
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            const tab = document.querySelector('#info-panel .tab-btn[data-tab="params"]');
+            if (tab) tab.click();
+            await wait(600);
+            const range = document.querySelector('#params-render input[type="range"]');
+            if (!range) return { error: '参数面板无滑块' };
+            const before = range.value;
+            range.value = range.max;
+            range.dispatchEvent(new Event('input', { bubbles: true }));
+            await wait(100);
+            const changed = range.value;
+            const btnAll = document.getElementById('btn-reset-all');
+            if (!btnAll) return { error: '无重置全部按钮' };
+            btnAll.click();
+            await wait(200);
+            return { before, changed, after: range.value };
+          })()
+        `);
+        const ok = uiOk && !uiOk.error && uiOk.changed !== uiOk.after && String(uiOk.after) === String(uiOk.before);
+        check('params-reset-refresh', ok,
+          uiOk.error || `重置前:${uiOk.before} 改后:${uiOk.changed} 重置后:${uiOk.after}`);
+      } catch (e) {
+        check('params-reset-refresh', false, String(e && e.message || e));
       }
     }
   } catch (err) {

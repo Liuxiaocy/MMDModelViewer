@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('mmdAPI', {
   getDefaultRoot: () => ipcRenderer.invoke('get-default-root'),
   /** 动作库根目录（<默认根>/动作） */
   getMotionRoot: () => ipcRenderer.invoke('get-motion-root'),
+  /** 场景模型根目录（<默认根>/场景） */
+  getSceneRoot: () => ipcRenderer.invoke('get-scene-root'),
   /** 读取文本文件内容（只读前 N 字节，默认 2MB） */
   readTextFile: (filePath, maxBytes) => ipcRenderer.invoke('read-text-file', filePath, maxBytes),
   /** 本地路径 -> mmd:// URL */
