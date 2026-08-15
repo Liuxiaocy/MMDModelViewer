@@ -658,6 +658,213 @@ function registerIpc() {
     }
     return { removed, freedBytes };
   });
+
+  // ========== 资源扫描：本地目录 + 压缩包内部候选（PMX/PMD/VMD/VPD） ==========
+  const scanTasks = new Map(); // taskId -> { cancelled:boolean, timeoutMs, startTime }
+
+  function classifyExt(ext) {
+    const e = String(ext || '').toLowerCase();
+    if (e === '.pmx' || e === '.pmd') return 'model';
+    if (e === '.vmd' || e === '.vpd') return 'motion';
+    return null;
+  }
+  function isArchiveFile(name) {
+    return ARCHIVE_EXTS.has(path.extname(String(name || '').toLowerCase()));
+  }
+  function candidateKey(src) {
+    // src: { sourcePath, archiveEntry? }
+    return src.archiveEntry
+      ? (src.sourcePath + '::' + src.archiveEntry)
+      : src.sourcePath;
+  }
+  async function listArchiveEntries(archivePath) {
+    try {
+      if (!fs.existsSync(archivePath)) return [];
+      const ext = path.extname(archivePath).toLowerCase();
+      if (!ARCHIVE_EXTS.has(ext)) return [];
+      if (ext !== '.rar' && typeof seven.list === 'function') {
+        return await new Promise((resolve) => {
+          seven.list(archivePath, (err, list) => {
+            if (err) return resolve([]);
+            if (!Array.isArray(list)) return resolve([]);
+            resolve(list.map(it => ({
+              name: String(it.name || it || ''),
+              size: typeof it.size === 'number' ? it.size : null,
+            })));
+          });
+        });
+      }
+      if (ext === '.rar') {
+        try {
+          const extractor = await unrar.createExtractorFromFile({ filepath: archivePath });
+          const it = extractor.extract();
+          return Array.from(it.files || []).map(f => ({
+            name: String(f.name || ''),
+            size: typeof f.unpackSize === 'number' ? f.unpackSize : null,
+          }));
+        } catch (_) { return []; }
+      }
+      return [];
+    } catch (e) {
+      console.error('[scan] listArchiveEntries failed:', archivePath, e);
+      return [];
+    }
+  }
+  async function collectFilesInRoot(root) {
+    // 先广度枚举，收集全部普通文件绝对路径（含压缩包）与大致总数量用于总进度
+    const out = [];
+    let dirsCount = 0;
+    try {
+      const st = await fsp.stat(root);
+      if (!st.isDirectory()) return { files: [], dirsApprox: 0 };
+    } catch (_) { return { files: [], dirsApprox: 0 }; }
+    const stack = [root];
+    while (stack.length) {
+      const cur = stack.pop();
+      let entries;
+      try { entries = await fsp.readdir(cur, { withFileTypes: true }); } catch (_) { entries = []; }
+      for (const ent of entries) {
+        const full = path.join(cur, ent.name);
+        if (ent.isDirectory()) {
+          stack.push(full);
+          dirsCount++;
+        } else if (ent.isFile()) {
+          out.push(full);
+        }
+      }
+    }
+    return { files: out, dirsApprox: dirsCount };
+  }
+
+  ipcMain.handle('start-resource-scan', async (evt, payload) => {
+    const { roots, intoArchives = true } = payload || {};
+    const taskId = 'scan_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    const win = BrowserWindow.fromWebContents(evt.sender);
+    scanTasks.set(taskId, { cancelled: false, startTime: Date.now() });
+    // 异步启动扫描（不阻塞 invoke 返回）
+    (async () => {
+      const task = scanTasks.get(taskId);
+      try {
+        const rootsArr = Array.isArray(roots) ? roots : [];
+        if (!rootsArr.length) {
+          win && win.webContents.send('scan-done', {
+            taskId, candidates: [], totalCount: 0, totalSize: 0,
+            error: '扫描根目录为空',
+          });
+          return;
+        }
+        // 1) 收集所有文件
+        const collectJobs = rootsArr.map(r => collectFilesInRoot(r));
+        const allCollected = await Promise.all(collectJobs);
+        const allFiles = [];
+        for (const c of allCollected) allFiles.push(...(c.files || []));
+        // 2) 分类
+        const modelOrMotionFiles = [];
+        const archiveFiles = [];
+        for (const f of allFiles) {
+          const ext = path.extname(f).toLowerCase();
+          const k = classifyExt(ext);
+          if (k) modelOrMotionFiles.push({ abs: f, kind: k });
+          else if (ARCHIVE_EXTS.has(ext)) archiveFiles.push({ abs: f });
+        }
+        // 总步骤：模型/动作文件数 + (intoArchives ? 压缩包数 : 0)
+        const totalSteps = modelOrMotionFiles.length + (intoArchives ? archiveFiles.length : 0);
+        let done = 0;
+        const candidates = [];
+        let totalSize = 0;
+        const pushCandidate = ({ name, ext, sourcePath, sourceType, archiveEntry, sizeEstimate, type }) => {
+          const id = itemId(type, candidateKey({ sourcePath, archiveEntry }));
+          candidates.push({ id, name, ext, sourcePath, sourceType, archiveEntry, sizeEstimate, type });
+          totalSize += Number(sizeEstimate) || 0;
+        };
+        const emitProgress = (currentDir) => {
+          win && win.webContents.send('scan-progress', { taskId, done, total: totalSteps, currentDir: String(currentDir || '') });
+        };
+        // 先统计本地文件
+        for (const mm of modelOrMotionFiles) {
+          if (task && task.cancelled) break;
+          const ext = path.extname(mm.abs).toLowerCase();
+          const base = path.basename(mm.abs);
+          let sizeEst = null;
+          try { const s = await fsp.stat(mm.abs); sizeEst = s.size; } catch (_) { /* noop */ }
+          pushCandidate({
+            name: base,
+            ext: ext.replace(/^\./, ''),
+            sourcePath: mm.abs,
+            sourceType: 'file',
+            archiveEntry: null,
+            sizeEstimate: sizeEst,
+            type: mm.kind,
+          });
+          done++;
+          if (done % 20 === 0 || done === totalSteps) emitProgress(mm.abs);
+        }
+        // 再处理压缩包（只识别，不解压内容，不复制）
+        if (intoArchives && !task.cancelled) {
+          for (const af of archiveFiles) {
+            if (task && task.cancelled) break;
+            const entries = await listArchiveEntries(af.abs);
+            for (const ent of entries) {
+              const ext = path.extname(ent.name).toLowerCase();
+              const kind = classifyExt(ext);
+              if (!kind) continue;
+              const baseName = path.basename(ent.name);
+              pushCandidate({
+                name: baseName,
+                ext: ext.replace(/^\./, ''),
+                sourcePath: af.abs,
+                sourceType: 'archive',
+                archiveEntry: ent.name,
+                sizeEstimate: Number(ent.size) || null,
+                type: kind,
+              });
+            }
+            done++;
+            emitProgress(af.abs);
+          }
+        }
+        const cancelled = task && task.cancelled;
+        win && win.webContents.send('scan-done', {
+          taskId,
+          candidates,
+          totalCount: candidates.length,
+          totalSize,
+          cancelled,
+        });
+      } catch (e) {
+        console.error('[scan] fatal:', e);
+        win && win.webContents.send('scan-done', {
+          taskId, candidates: [], totalCount: 0, totalSize: 0,
+          error: (e && e.message) || String(e),
+        });
+      } finally {
+        scanTasks.delete(taskId);
+      }
+    })();
+    return { taskId };
+  });
+
+  ipcMain.handle('cancel-resource-scan', async (_e, taskId) => {
+    const t = scanTasks.get(String(taskId || ''));
+    if (t) t.cancelled = true;
+    return { ok: true };
+  });
+
+  // 缓存复制：把候选（文件或压缩包条目）实际复制/提取到 cache/models 或 cache/motions
+  // Task 6 将在同一个 clear-cache handle 之后、registerIpc 闭合 } 之前继续追加实现。
+  // 此处先留 stub（让 preload 中暴露的 API 不报错），真正落地在 Task 6。
+  ipcMain.handle('cache-selected-resources', async (_e, payload) => {
+    const taskId = String((payload && payload.taskId) || ('copy_' + Date.now().toString(36)));
+    const win = BrowserWindow.fromWebContents(_e.sender);
+    (async () => {
+      win && win.webContents.send('cache-done', {
+        taskId,
+        summary: { ok: 0, fail: 0, indexVersion: 0 },
+        error: 'cache-selected-resources 尚未实现（预计在 Task 6 落地）',
+      });
+    })();
+    return { ok: true };
+  });
 }
 
 // ---------- 冒烟测试模式（--smoke-test） ----------
