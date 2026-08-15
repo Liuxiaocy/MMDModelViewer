@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, dialog, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const fsp = require('fs/promises');
 const os = require('os');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
@@ -476,6 +477,186 @@ function registerIpc() {
   // ---------- ammo.wasm 目录路径（布料物理用） ----------
   ipcMain.handle('get-ammo-libs-dir', () => {
     return path.join(__dirname, 'node_modules', 'three', 'examples', 'jsm', 'libs');
+  });
+
+  // ========== 缓存资源识别 & 管理 ==========
+
+  function cachePaths() {
+    const root = path.join(app.getPath('userData'), 'cache');
+    return {
+      root,
+      models:  path.join(root, 'models'),
+      motions: path.join(root, 'motions'),
+      thumbs:  path.join(root, 'thumbs'),
+      tmp:     path.join(root, 'tmp'),
+      index:   path.join(root, 'index.json'),
+    };
+  }
+  async function ensureCacheDirs() {
+    const p = cachePaths();
+    await Promise.all([p.root, p.models, p.motions, p.thumbs, p.tmp].map(d => fsp.mkdir(d, { recursive: true })));
+    return p;
+  }
+  async function readIndex() {
+    const p = cachePaths();
+    try {
+      const raw = await fsp.readFile(p.index, 'utf8');
+      const data = JSON.parse(raw);
+      if (!data || !Array.isArray(data.items)) return { version: 1, items: [] };
+      return data;
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return { version: 1, items: [] };
+      console.error('[cache] readIndex failed:', e);
+      return { version: 1, items: [] };
+    }
+  }
+  async function writeIndex(idx) {
+    const p = cachePaths();
+    await fsp.writeFile(p.index, JSON.stringify(idx, null, 2), 'utf8');
+  }
+  async function calcDirSize(dir) {
+    let total = 0;
+    try {
+      const entries = await fsp.readdir(dir, { withFileTypes: true });
+      for (const ent of entries) {
+        const fp = path.join(dir, ent.name);
+        if (ent.isDirectory()) total += await calcDirSize(fp);
+        else if (ent.isFile()) {
+          try { const s = await fsp.stat(fp); total += s.size; } catch (_) { /* noop */ }
+        }
+      }
+    } catch (_) { /* noop */ }
+    return total;
+  }
+  function itemId(type, keySource) {
+    return (type === 'model' ? 'm_' : 'v_') +
+      crypto.createHash('sha1').update(keySource).digest('hex').slice(0, 12);
+  }
+  function safeFilename(name) {
+    return String(name || 'file')
+      .replace(/[\\/:*?"<>|\s]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 120) || 'file';
+  }
+
+  // ---- IPC: 缓存目录信息 ----
+  ipcMain.handle('get-cache-dir-info', async () => {
+    const p = await ensureCacheDirs();
+    const total = await calcDirSize(p.root);
+    return {
+      root: p.root,
+      models: p.models,
+      motions: p.motions,
+      thumbs: p.thumbs,
+      tmp: p.tmp,
+      totalSize: total,
+    };
+  });
+
+  // ---- IPC: 获取缓存索引 ----
+  ipcMain.handle('get-cache-index', async () => {
+    await ensureCacheDirs();
+    const idx = await readIndex();
+    const totalSize = (idx.items || []).reduce((s, it) => s + (Number(it.cacheSize) || 0), 0);
+    return { index: idx, totalSize };
+  });
+
+  // ---- IPC: 写入缩略图 PNG 并更新 index.thumb ----
+  ipcMain.handle('write-cache-thumb', async (_e, { id, base64Png }) => {
+    if (!id || !base64Png) return { ok: false, error: 'missing id or base64Png' };
+    const p = await ensureCacheDirs();
+    try {
+      const clean = String(base64Png).replace(/^data:image\/png;base64,/i, '');
+      const data = Buffer.from(clean, 'base64');
+      const thumbPath = `thumbs/${id}.png`;
+      const abs = path.join(p.root, thumbPath);
+      await fsp.writeFile(abs, data);
+      const idx = await readIndex();
+      const it = Array.isArray(idx.items) ? idx.items.find(x => x && x.id === id) : null;
+      if (it) { it.thumb = thumbPath; await writeIndex(idx); }
+      return { ok: true, thumbPath };
+    } catch (e) {
+      console.error('[cache] writeCacheThumb failed:', e);
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  });
+
+  // ---- IPC: 删除指定缓存项（按 id） ----
+  ipcMain.handle('delete-cache-items', async (_e, ids) => {
+    if (!Array.isArray(ids)) return { deleted: [], failed: [] };
+    const p = await ensureCacheDirs();
+    const idx = await readIndex();
+    const items = Array.isArray(idx.items) ? idx.items : [];
+    const deleted = [];
+    const failed  = [];
+    for (const id of ids) {
+      const i = items.findIndex(x => x && x.id === id);
+      if (i < 0) { failed.push(String(id)); continue; }
+      const it = items[i];
+      try {
+        if (it && it.cachePath) {
+          const abs = String(it.cachePath).startsWith(p.root)
+            ? String(it.cachePath)
+            : path.join(p.root, String(it.cachePath));
+          try { await fsp.unlink(abs); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+          try {
+            const parentDir = path.dirname(abs);
+            const rel = path.relative(p.root, parentDir);
+            if (rel && !rel.startsWith('..')) {
+              const ents = await fsp.readdir(parentDir);
+              if (!ents.length) await fsp.rmdir(parentDir);
+            }
+          } catch (_) { /* noop */ }
+        }
+        if (it && it.thumb) {
+          const tAbs = path.join(p.root, String(it.thumb));
+          try { await fsp.unlink(tAbs); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        }
+        items.splice(i, 1);
+        deleted.push(String(id));
+      } catch (e) {
+        console.error('[cache] delete item failed:', id, e);
+        failed.push(String(id));
+      }
+    }
+    idx.items = items;
+    await writeIndex(idx);
+    return { deleted, failed };
+  });
+
+  // ---- IPC: 清空缓存（按 models/motions/all） ----
+  ipcMain.handle('clear-cache', async (_e, scope) => {
+    const p = await ensureCacheDirs();
+    const idx = await readIndex();
+    const items = Array.isArray(idx.items) ? idx.items : [];
+    let removed = 0;
+    let freedBytes = 0;
+    const keep = [];
+    for (const it of items) {
+      const matches = scope === 'all'
+        || (scope === 'models'  && it.type === 'model')
+        || (scope === 'motions' && it.type === 'motion');
+      if (matches) {
+        removed++;
+        freedBytes += Number(it.cacheSize) || 0;
+      } else {
+        keep.push(it);
+      }
+    }
+    idx.items = keep;
+    await writeIndex(idx);
+    const tryRm = async (d) => { try { await fsp.rm(d, { recursive: true, force: true }); } catch (_) { /* noop */ } };
+    if (scope === 'all') {
+      await tryRm(p.models); await tryRm(p.motions); await tryRm(p.thumbs);
+      await fsp.mkdir(p.models, { recursive: true });
+      await fsp.mkdir(p.motions, { recursive: true });
+      await fsp.mkdir(p.thumbs, { recursive: true });
+    } else if (scope === 'models') {
+      await tryRm(p.models); await fsp.mkdir(p.models, { recursive: true });
+    } else if (scope === 'motions') {
+      await tryRm(p.motions); await fsp.mkdir(p.motions, { recursive: true });
+    }
+    return { removed, freedBytes };
   });
 }
 
