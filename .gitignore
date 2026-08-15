@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-smoke/
+.npm-cache/
+.electron-cache/
+renderer/bundle.js
+renderer/bundle.js.map
+smoke-result.json
+*.log

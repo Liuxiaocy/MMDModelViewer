@@ -1,0 +1,53 @@
+{
+  "name": "mmd-model-viewer",
+  "productName": "MMDModelViewer",
+  "version": "0.1.0",
+  "description": "本地 3D 模型（MMD PMX/PMD）便捷查看与预览工具",
+  "main": "main.js",
+  "author": "MMDModelViewer",
+  "license": "MIT",
+  "scripts": {
+    "build:renderer": "esbuild renderer/renderer.js --bundle --format=esm --outfile=renderer/bundle.js --sourcemap",
+    "start": "npm run build:renderer && electron .",
+    "smoke": "npm run build:renderer && electron . --smoke-test",
+    "dist": "npm run build:renderer && electron-builder --win"
+  },
+  "dependencies": {
+    "7zip-min": "^2.0.0",
+    "node-unrar-js": "^2.0.2"
+  },
+  "devDependencies": {
+    "7zip-bin": "^5.2.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "esbuild": "^0.28.2",
+    "three": "^0.170.0"
+  },
+  "build": {
+    "appId": "com.mmdviewer.app",
+    "productName": "MMDModelViewer",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/7zip-bin/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}

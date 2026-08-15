@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' 'unsafe-inline' mmd: data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: mmd:; connect-src 'self' mmd: data: blob:;" />
+  <title>MMDModelViewer - 本地3D模型预览器</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部工具栏 -->
+    <header id="toolbar">
+      <span class="app-title">MMD 模型预览器</span>
+      <button id="btn-refresh" class="btn" title="重新扫描当前目录">刷新</button>
+      <button id="btn-choose-dir" class="btn" title="选择其他模型目录">选择目录…</button>
+      <span id="root-path" class="root-path"></span>
+      <span class="spacer"></span>
+      <button id="btn-reset-view" class="btn" title="重置视角">重置视角</button>
+      <button id="btn-screenshot" class="btn btn-primary" title="导出当前视角为 PNG">截图导出</button>
+    </header>
+
+    <div id="main">
+      <!-- 左侧面板（tab：模型库 / 动作库） -->
+      <aside id="sidebar">
+        <div class="side-tabs">
+          <button class="side-tab active" data-tab="models">🧊 模型库</button>
+          <button class="side-tab" data-tab="motions">🎬 动作库</button>
+        </div>
+
+        <!-- 面包屑导航（返回/前进 + 路径） -->
+        <div class="breadcrumb-bar">
+          <div class="nav-btns">
+            <button id="btn-back" class="btn-icon" title="返回上一级（Alt+←）" disabled>◀</button>
+            <button id="btn-forward" class="btn-icon" title="前进（Alt+→）" disabled>▶</button>
+            <button id="btn-up" class="btn-icon" title="进入父目录（Backspace）" disabled>⬆</button>
+            <button id="btn-home" class="btn-icon" title="回到默认根目录">🏠</button>
+          </div>
+          <div id="breadcrumb" class="breadcrumb">
+            <span class="crumb placeholder">扫描中…</span>
+          </div>
+        </div>
+
+        <!-- 两个视图：模型库（文件树） / 动作库（列表+筛选） -->
+        <div class="side-views">
+          <div class="side-view" data-view="models">
+            <div class="panel-title-small">文件目录</div>
+            <div id="file-tree" class="file-tree"></div>
+          </div>
+          <div class="side-view hidden" data-view="motions">
+            <div class="panel-title-small">
+              动作目录
+              <input id="motion-filter" class="filter-input" type="text" placeholder="搜索动作…" />
+            </div>
+            <div id="motion-list" class="motion-list">
+              <div class="placeholder">扫描中…</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 中央预览区 -->
+      <section id="viewport">
+        <canvas id="gl-canvas"></canvas>
+        <div id="view-hint" class="view-hint">左键旋转 · 右键平移 · 滚轮缩放 · 双击模型重置视角</div>
+
+        <!-- 快速预览卡：悬停/选中文件时出现（文件信息、动作预览等） -->
+        <div id="preview-card" class="preview-card hidden">
+          <div class="pc-header">
+            <span id="pc-title" class="pc-title">—</span>
+            <button id="pc-close" class="pc-close" title="关闭">×</button>
+          </div>
+          <div id="pc-body" class="pc-body"></div>
+        </div>
+
+        <!-- 压缩包内容预览浮层（不解压即可查看条目） -->
+        <div id="archive-preview" class="preview-card hidden">
+          <div class="pc-header">
+            <span id="ap-title" class="pc-title">压缩包内容</span>
+            <div>
+              <button id="ap-extract" class="btn btn-small btn-primary">全部解压并浏览</button>
+              <button id="ap-close" class="pc-close" title="关闭">×</button>
+            </div>
+          </div>
+          <div id="ap-body" class="pc-body ap-body"></div>
+        </div>
+
+        <!-- 右下角动作播放控制 -->
+        <div id="anim-panel" class="anim-panel hidden">
+          <div class="anim-title">动作播放 (VMD)</div>
+          <div id="vmd-list" class="vmd-list"></div>
+          <div class="anim-controls">
+            <button id="btn-play" class="btn btn-small">播放</button>
+            <button id="btn-pause" class="btn btn-small">暂停</button>
+            <button id="btn-stop" class="btn btn-small">停止</button>
+            <label class="speed-label">速度
+              <input id="speed-range" type="range" min="0.1" max="3" step="0.1" value="1" />
+            </label>
+            <span id="speed-val" class="speed-val">1.0x</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 右侧信息栏 -->
+      <aside id="info-panel">
+        <div class="panel-title">模型信息</div>
+        <div id="model-info" class="model-info">
+          <div class="placeholder">在左侧选择模型文件开始预览</div>
+        </div>
+      </aside>
+    </div>
+
+    <footer id="statusbar">
+      <span id="status-text">就绪</span>
+      <span id="status-detail" class="status-detail"></span>
+    </footer>
+  </div>
+
+  <script type="module" src="bundle.js"></script>
+</body>
+</html>
