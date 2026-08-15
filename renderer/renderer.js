@@ -68,6 +68,127 @@ const dirDescendants = new Map();  // key: dirPath(normalized) -> Set<HTMLElemen
 // ---------- 最近加载（localStorage 持久化） ----------
 const RECENT_KEY = 'mmdviewer_recent';
 const RECENT_MAX = 20;
+// ---------- 参数面板持久化 ----------
+const PARAMS_KEY = 'mmdviewer_params_v1';
+const DEFAULT_PARAMS = {
+  render: {
+    outlineEnabled:   { t: 'switch', v: true,  label: '轮廓描边',    hint: '稳定模型边缘抖动' },
+    edgeStrength:     { t: 'range',  v: 0.9,   label: '边缘强度',    min: 0, max: 2, step: 0.01 },
+    edgeThickness:    { t: 'range',  v: 0.003, label: '边缘粗细',    min: 0.0001, max: 0.01, step: 0.0001 },
+    edgeColor:        { t: 'color',  v: '#111827', label: '边缘颜色' },
+    fxaaEnabled:      { t: 'switch', v: true,  label: 'FXAA 快速抗锯齿' },
+    pixelRatioMax:    { t: 'range',  v: 2,     label: '像素比上限',  min: 1, max: 3, step: 0.25 },
+    shadowEnabled:    { t: 'switch', v: true,  label: '阴影' },
+    shadowSoftness:   { t: 'range',  v: 1,     label: '阴影柔和度',  min: 0, max: 2, step: 0.05 },
+    ambientIntensity: { t: 'range',  v: 0.65,  label: '环境光强度',  min: 0, max: 2, step: 0.01 },
+    dirIntensity:     { t: 'range',  v: 1.0,   label: '主光强度',    min: 0, max: 3, step: 0.01 },
+    fillIntensity:    { t: 'range',  v: 0.30,  label: '补光强度',    min: 0, max: 3, step: 0.01 },
+    bgColor:          { t: 'color',  v: '#F0F1F5', label: '背景色' },
+    gridVisible:      { t: 'switch', v: true,  label: '显示网格地面' },
+  },
+  physics: {
+    enabled:          { t: 'switch', v: true,  label: '物理（布料/刚体）', hint: '加载新模型时生效' },
+    gravity:          { t: 'range',  v: 9.8,   label: '重力 m/s²',   min: 0, max: 20, step: 0.1 },
+    unitStep:         { t: 'select', v: '1/60',label: '物理步进',
+                        options: [['1/60','1/60'],['1/120','1/120'],['1/30','1/30']] },
+    maxStepNum:       { t: 'range',  v: 2,     label: '最大迭代步数', min: 1, max: 6, step: 1 },
+    autoDisableHeavy: { t: 'switch', v: true,  label: '刚体>200自动关闭物理' },
+  },
+  ik: {
+    enabled:          { t: 'switch', v: true,  label: 'IK 求解（下肢/手臂）', hint: '加载新模型/切动作时生效' },
+    iteration:        { t: 'range',  v: 50,    label: 'IK 迭代次数',  min: 1, max: 200, step: 1 },
+    toleranceAngle:   { t: 'range',  v: 0.08,  label: 'IK 收敛角(rad)', min: 0.001, max: 0.5, step: 0.001 },
+  },
+  anim: {
+    speedScale:       { t: 'range',  v: 1.0,   label: '全局速度倍率',  min: 0.1, max: 3, step: 0.05 },
+    loopAnimation:    { t: 'switch', v: true,  label: '循环播放动作' },
+    resetOnStop:      { t: 'switch', v: true,  label: '停止后回到BindPose' },
+    afterglow:        { t: 'range',  v: 0.1,   label: '切动作余辉(秒)', min: 0, max: 1, step: 0.01 },
+  },
+};
+let PARAMS = {};
+const PARAM_DEFS = DEFAULT_PARAMS;
+function flattenParams(src) {
+  const out = {};
+  for (const g of Object.keys(src || {})) {
+    const grp = src[g] || {};
+    for (const k of Object.keys(grp)) {
+      out[`${g}.${k}`] = grp[k].v;
+    }
+  }
+  return out;
+}
+function loadParams() {
+  const defaults = flattenParams(DEFAULT_PARAMS);
+  try {
+    const raw = localStorage.getItem(PARAMS_KEY);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      PARAMS = Object.assign({}, defaults, obj || {});
+      return;
+    }
+  } catch (_) { /* noop */ }
+  PARAMS = Object.assign({}, defaults);
+}
+function saveParams() {
+  try { localStorage.setItem(PARAMS_KEY, JSON.stringify(PARAMS || {})); } catch (_) { /* ignore */ }
+}
+function getParam(group, key, fallback) {
+  const v = PARAMS[`${group}.${key}`];
+  return (typeof v === 'undefined' || v === null) ? fallback : v;
+}
+function setParam(group, key, value, { persist = true, apply = true } = {}) {
+  const k = `${group}.${key}`;
+  const prev = PARAMS[k];
+  PARAMS[k] = value;
+  if (persist) saveParams();
+  if (apply) applyParam(group, key, value, prev);
+}
+function applyParam(group, key, value, prev) {
+  const set = (obj, field, transform) => { if (obj && typeof obj[field] !== 'undefined') obj[field] = (transform ? transform(value) : value); };
+  if (group === 'render') {
+    if (key === 'shadowEnabled') set(renderer.shadowMap, 'enabled');
+    if (key === 'pixelRatioMax') {
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, Math.max(1, Number(value) || 1)));
+      resize();
+    }
+    if (key === 'bgColor') { try { scene.background = new THREE.Color(String(value)); } catch (_) {} }
+    if (key === 'gridVisible') { try { gridHelper.visible = !!value; } catch (_) {} }
+    if (key === 'shadowSoftness') { /* TODO Task 10: 根据 value 切 PCFSoft / VSM / PCF */ }
+    if (key === 'outlineEnabled' || key === 'edgeStrength' || key === 'edgeThickness' || key === 'edgeColor' || key === 'fxaaEnabled') {
+      /* TODO Task 10: outlinePass.uniforms / FXAA 开关 / composer 的 pass 顺序 */
+    }
+    if (key === 'ambientIntensity' || key === 'dirIntensity' || key === 'fillIntensity') {
+      /* TODO Task 10: 为 ambientLight / dirLight / fillLight 引用建立常量后赋值 */
+    }
+  } else if (group === 'physics' || group === 'ik') {
+  } else if (group === 'anim') {
+    if (key === 'speedScale') {
+      try {
+        if (speedRange) { speedRange.value = String(Math.max(0.1, Math.min(3, Number(value) || 1))); }
+        if (speedVal) { speedVal.textContent = parseFloat(speedRange.value).toFixed(1) + 'x'; }
+      } catch (_) { /* noop */ }
+    }
+    if (key === 'loopAnimation') { /* TODO Task 11: obj.mixer._actions[] each action.loop = LoopOnce/LoopRepeat */ }
+    if (key === 'resetOnStop') { /* TODO Task 11: btn-stop 行为开关 */ }
+    if (key === 'afterglow') { /* TODO Task 11: 重建 MMDAnimationHelper({ afterglow }) */ }
+  }
+}
+function resetParamGroup(groupName) {
+  const defaults = flattenParams(DEFAULT_PARAMS);
+  for (const gk of Object.keys(defaults)) {
+    const [g, k] = gk.split('.');
+    if (g !== groupName) continue;
+    setParam(g, k, defaults[gk], { persist: true, apply: true });
+  }
+}
+function resetAllParams() {
+  const defaults = flattenParams(DEFAULT_PARAMS);
+  for (const gk of Object.keys(defaults)) {
+    const [g, k] = gk.split('.');
+    setParam(g, k, defaults[gk], { persist: true, apply: true });
+  }
+}
 function loadRecent() {
   try {
     const raw = localStorage.getItem(RECENT_KEY);
@@ -114,8 +235,10 @@ controls.maxDistance = 60;
 controls.update();
 
 // 灯光
-scene.add(new THREE.AmbientLight(0xffffff, 0.65));
-scene.add(new THREE.HemisphereLight(0xEAF1FF, 0xE2E8F0, 0.55));
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+scene.add(ambientLight);
+const hemisphereLight = new THREE.HemisphereLight(0xEAF1FF, 0xE2E8F0, 0.55);
+scene.add(hemisphereLight);
 const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
 dirLight.position.set(3, 6, 4);
 dirLight.castShadow = true;
@@ -530,9 +653,18 @@ function toggleDir(rowEl, forceExpand) {
   const currentlyCollapsed = twisty.textContent === '▸';
   const shouldExpand = forceExpand === undefined ? currentlyCollapsed : !!forceExpand;
   if (shouldExpand) {
-    // 展开：所有后代都可见（已折叠的子目录自己的后代由子目录的 twisty 独立控制）
+    // 展开：本目录所有后代先恢复可见，再对仍处于折叠状态的子目录重新隐藏其后代
     twisty.textContent = '▾';
     if (desc) desc.forEach((r) => r.classList.remove('collapsed-descendant'));
+    if (desc) desc.forEach((r) => {
+      if (r.dataset.isDir === '1') {
+        const subTwisty = r.querySelector('.w10-twisty');
+        if (subTwisty && subTwisty.textContent === '▸') {
+          const subDesc = dirDescendants.get(normalizePath(r.dataset.path));
+          if (subDesc) subDesc.forEach((sr) => sr.classList.add('collapsed-descendant'));
+        }
+      }
+    });
   } else {
     // 折叠：所有后代全部隐藏（与 Win10 资源管理器一致）
     twisty.textContent = '▸';
@@ -1319,6 +1451,183 @@ btnHome.addEventListener('click', goHome);
 libCards.forEach((c) => {
   c.addEventListener('click', () => switchTab(c.dataset.tab, true));
 });
+// ---------- 右侧面板 Tab 切换（info/params/cache） ----------
+document.querySelectorAll('#info-panel .tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const want = btn.dataset.tab;
+    document.querySelectorAll('#info-panel .tab-btn').forEach((b) => {
+      const active = b === btn;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('#info-panel .tab-content').forEach((c) => {
+      c.classList.toggle('hidden', c.dataset.view !== want);
+    });
+    if (want === 'params') {
+      renderParamPanel();
+    } else if (want === 'cache') {
+      renderCacheTab();
+    }
+  });
+});
+// ---------- 参数面板 UI 渲染 ----------
+let currentParamGroup = 'render';
+function renderParamPanel(group) {
+  if (group && ['render', 'physics', 'ik', 'anim'].includes(group)) currentParamGroup = group;
+  ['render', 'physics', 'ik', 'anim'].forEach((g) => {
+    const root = document.querySelector(`#params-${g} .group-rows`);
+    if (!root) return;
+    if (root.dataset.built === '1') {
+      syncParamValuesFromState(g);
+      return;
+    }
+    const defs = PARAM_DEFS[g] || {};
+    root.innerHTML = '';
+    Object.keys(defs).forEach((k) => {
+      const d = defs[k];
+      if (!d) return;
+      const row = document.createElement('div');
+      row.className = 'param-row';
+      row.title = d.hint || d.label || k;
+      const name = document.createElement('div');
+      name.className = 'param-name';
+      name.textContent = d.label || k;
+      const ctrl = document.createElement('div');
+      ctrl.className = 'param-control';
+      const cur = getParam(g, k, d.v);
+      if (d.t === 'switch') {
+        const id = `p_${g}_${k}`;
+        const lbl = document.createElement('label');
+        lbl.className = 'switch';
+        lbl.innerHTML = `<input id="${id}" type="checkbox" ${cur ? 'checked' : ''}><span></span>`;
+        lbl.querySelector('input').addEventListener('change', (e) => {
+          setParam(g, k, !!e.target.checked);
+        });
+        ctrl.appendChild(lbl);
+      } else if (d.t === 'range') {
+        const id = `p_${g}_${k}`;
+        const range = document.createElement('input');
+        range.type = 'range'; range.id = id;
+        range.min = d.min; range.max = d.max; range.step = d.step;
+        range.value = cur;
+        const span = document.createElement('span');
+        span.className = 'range-val';
+        span.textContent = formatRangeValue(cur, d);
+        range.addEventListener('input', (e) => {
+          const v = parseFloat(e.target.value);
+          span.textContent = formatRangeValue(v, d);
+          setParam(g, k, v);
+        });
+        ctrl.appendChild(range);
+        ctrl.appendChild(span);
+      } else if (d.t === 'select') {
+        const sel = document.createElement('select');
+        sel.className = 'param-select';
+        (d.options || []).forEach(([val, label]) => {
+          const o = document.createElement('option');
+          o.value = val; o.textContent = label || val;
+          if (String(val) === String(cur)) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.addEventListener('change', (e) => setParam(g, k, e.target.value));
+        ctrl.appendChild(sel);
+      } else if (d.t === 'color') {
+        const cp = document.createElement('input');
+        cp.type = 'color'; cp.className = 'param-color';
+        cp.value = cur;
+        cp.addEventListener('input', (e) => setParam(g, k, e.target.value));
+        ctrl.appendChild(cp);
+      }
+      row.appendChild(name);
+      row.appendChild(ctrl);
+      root.appendChild(row);
+    });
+    root.dataset.built = '1';
+  });
+}
+function formatRangeValue(v, d) {
+  const step = Number(d && d.step) || 0.01;
+  const digits = (String(step).split('.')[1] || '').length;
+  return Number(v).toFixed(digits);
+}
+function syncParamValuesFromState(group) {
+  const defs = PARAM_DEFS[group] || {};
+  const root = document.querySelector(`#params-${group} .group-rows`);
+  if (!root) return;
+  Object.keys(defs).forEach((k) => {
+    const d = defs[k];
+    const cur = getParam(group, k, d.v);
+    const id = `p_${group}_${k}`;
+    if (d.t === 'switch') {
+      const el = document.getElementById(id);
+      if (el) el.checked = !!cur;
+    } else if (d.t === 'range') {
+      const el = document.getElementById(id);
+      const span = root.querySelector(`#${id} ~ .range-val`);
+      if (el) el.value = cur;
+      if (span) span.textContent = formatRangeValue(cur, d);
+    } else if (d.t === 'select') {
+      const sel = root.querySelector(`select.param-select`);
+      if (sel) sel.value = String(cur);
+    } else if (d.t === 'color') {
+      const idx = Object.keys(defs).findIndex(x => x === k);
+      const colors = root.querySelectorAll('input.param-color');
+      const pick = colors[idx];
+      if (pick) pick.value = String(cur);
+    }
+  });
+}
+(function bindParamReset() {
+  const btnGroup = $('btn-reset-group');
+  const btnAll = $('btn-reset-all');
+  if (btnGroup) btnGroup.addEventListener('click', () => {
+    resetParamGroup(currentParamGroup);
+    setStatus(`已重置参数组：${currentParamGroup}`, 'info');
+  });
+  if (btnAll) btnAll.addEventListener('click', () => {
+    resetAllParams();
+    setStatus('已重置所有参数到默认值', 'info');
+  });
+})();
+(function observeParamGroupInView() {
+  const container = document.querySelector('[data-view="params"]');
+  if (!container) return;
+  const groups = container.querySelectorAll('.param-group');
+  const io = new IntersectionObserver((entries) => {
+    let best = null;
+    let bestRect = null;
+    entries.forEach((en) => {
+      if (!en.isIntersecting) return;
+      const r = en.boundingClientRect;
+      if (!bestRect || Math.abs(r.top) < Math.abs(bestRect.top)) { best = en.target.dataset.group; bestRect = r; }
+    });
+    if (best) currentParamGroup = best;
+  }, { root: container, threshold: [0.1, 0.5] });
+  groups.forEach((g) => io.observe(g));
+})();
+if (speedRange) {
+  speedRange.addEventListener('change', () => {
+    const v = parseFloat(speedRange.value) || 1;
+    setParam('anim', 'speedScale', v, { persist: true, apply: false });
+  });
+}
+// ---------- 缓存资源 Tab 渲染桩（Task 8 完成真实实现） ----------
+async function renderCacheTab() {
+  const grid = $('cache-grid');
+  const sizeBadge = $('cache-size');
+  if (!grid) return;
+  try {
+    const info = await (api && api.getCacheDirInfo ? api.getCacheDirInfo() : Promise.resolve(null));
+    if (sizeBadge) {
+      sizeBadge.textContent = info ? fmtSize(Number(info.totalSize) || 0) : '—';
+    }
+    if (grid.childElementCount === 0 || (grid.children.length === 1 && grid.children[0].classList.contains('placeholder'))) {
+      grid.innerHTML = '<div class="placeholder">暂无缓存。打开工具栏「自动识别缓存」开关开始扫描。</div>';
+    }
+  } catch (_) {
+    if (sizeBadge) sizeBadge.textContent = '—';
+  }
+}
 
 // 动作搜索
 motionFilterEl.addEventListener('input', (e) => { motionFilterKw = e.target.value; renderMotionList(); });
@@ -1390,6 +1699,7 @@ async function initAmmo() {
 // ---------- 启动 ----------
 async function init() {
   loadRecent();
+  loadParams();
   // 先启动 ammo 预加载（与扫描根目录并行，保证第一个模型加载时 ammo 已就绪）
   const ammoPromise = initAmmo();
   try {
