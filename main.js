@@ -660,7 +660,9 @@ function registerIpc() {
   });
 
   // ========== 资源扫描：本地目录 + 压缩包内部候选（PMX/PMD/VMD/VPD） ==========
-  const scanTasks = new Map(); // taskId -> { cancelled:boolean, timeoutMs, startTime }
+  const scanTasks = new Map();        // taskId -> { cancelled:boolean, startTime }
+  const scanCandidatesCache = new Map(); // taskId -> Candidate[]
+  const cacheCopyTasks = new Map();   // taskId -> { cancelled:boolean }
 
   function classifyExt(ext) {
     const e = String(ext || '').toLowerCase();
@@ -824,6 +826,7 @@ function registerIpc() {
           }
         }
         const cancelled = task && task.cancelled;
+        if (!cancelled) scanCandidatesCache.set(taskId, candidates);
         win && win.webContents.send('scan-done', {
           taskId,
           candidates,
@@ -839,6 +842,7 @@ function registerIpc() {
         });
       } finally {
         scanTasks.delete(taskId);
+        setTimeout(() => scanCandidatesCache.delete(taskId), 60 * 1000);
       }
     })();
     return { taskId };
@@ -851,17 +855,159 @@ function registerIpc() {
   });
 
   // 缓存复制：把候选（文件或压缩包条目）实际复制/提取到 cache/models 或 cache/motions
-  // Task 6 将在同一个 clear-cache handle 之后、registerIpc 闭合 } 之前继续追加实现。
-  // 此处先留 stub（让 preload 中暴露的 API 不报错），真正落地在 Task 6。
+  async function findFileInDirCaseInsensitive(dir, relativeName) {
+    const parts = String(relativeName || '').split(/[\\/]/).filter(Boolean);
+    let cur = dir;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      let ents;
+      try { ents = await fsp.readdir(cur, { withFileTypes: true }); } catch (_) { return null; }
+      const lower = String(part).toLowerCase();
+      const hit = ents.find(e => String(e.name).toLowerCase() === lower);
+      if (!hit) return null;
+      cur = path.join(cur, hit.name);
+      if (i === parts.length - 1) {
+        if (hit.isFile()) return cur;
+        return null;
+      } else {
+        if (!hit.isDirectory()) return null;
+      }
+    }
+    return null;
+  }
+  async function copyOne(candidate, cpaths, existingIds) {
+    const { id, type, name, ext, sourcePath, sourceType, archiveEntry } = candidate;
+    if (existingIds.has(String(id))) {
+      return { succeeded: false, skipped: true, reason: 'already_cached' };
+    }
+    const extDot = '.' + String(ext || '').toLowerCase();
+    const safeBase = safeFilename(String(name || 'file'));
+    const shortId = String(id).replace(/^(m_|v_)/, '').slice(0, 8);
+    const cacheFile = `${safeBase}-${shortId}${extDot}`;
+    const subDir = type === 'motion' ? cpaths.motions : cpaths.models;
+    const absDest = path.join(subDir, cacheFile);
+    const relDest = (type === 'motion' ? 'motions/' : 'models/') + cacheFile;
+
+    let fromAbs = null;
+    let tmpDirToClean = null;
+    try {
+      if (sourceType === 'file') {
+        fromAbs = sourcePath;
+      } else if (sourceType === 'archive') {
+        const dest = await extractArchive(sourcePath);
+        tmpDirToClean = dest;
+        const found = await findFileInDirCaseInsensitive(dest, archiveEntry);
+        if (!found) {
+          return { succeeded: false, skipped: false, reason: 'archive_entry_not_found:' + (archiveEntry || '') };
+        }
+        fromAbs = found;
+      } else {
+        return { succeeded: false, skipped: false, reason: 'unknown_source_type:' + sourceType };
+      }
+      try { await fsp.mkdir(path.dirname(absDest), { recursive: true }); } catch (_) { /* noop */ }
+      await fsp.copyFile(fromAbs, absDest);
+      let cacheSize = null;
+      try { const st = await fsp.stat(absDest); cacheSize = st.size; } catch (_) { /* noop */ }
+      if (tmpDirToClean) {
+        try { await fsp.rm(tmpDirToClean, { recursive: true, force: true }); } catch (_) { /* noop */ }
+        extractCache.delete(sourcePath);
+      }
+      return {
+        succeeded: true,
+        skipped: false,
+        indexItem: {
+          id, type,
+          name: String(name || ''),
+          ext: String(ext || '').toLowerCase(),
+          sourcePath: String(sourcePath || ''),
+          sourceType: sourceType === 'archive' ? 'archive' : 'file',
+          archiveEntry: archiveEntry || null,
+          cachePath: relDest,
+          thumb: null,
+          cacheSize,
+          addedAt: Date.now(),
+        },
+      };
+    } catch (e) {
+      console.error('[cache] copyOne failed:', candidate, e);
+      if (tmpDirToClean) {
+        try { await fsp.rm(tmpDirToClean, { recursive: true, force: true }); } catch (_) { /* noop */ }
+      }
+      return { succeeded: false, skipped: false, reason: (e && e.message) || String(e) };
+    }
+  }
+
   ipcMain.handle('cache-selected-resources', async (_e, payload) => {
-    const taskId = String((payload && payload.taskId) || ('copy_' + Date.now().toString(36)));
+    const { taskId, ids } = payload || {};
+    const tid = String(taskId || ('copy_' + Date.now().toString(36)));
     const win = BrowserWindow.fromWebContents(_e.sender);
+    cacheCopyTasks.set(tid, { cancelled: false });
     (async () => {
-      win && win.webContents.send('cache-done', {
-        taskId,
-        summary: { ok: 0, fail: 0, indexVersion: 0 },
-        error: 'cache-selected-resources 尚未实现（预计在 Task 6 落地）',
-      });
+      const t = cacheCopyTasks.get(tid);
+      try {
+        await ensureCacheDirs();
+        const cpaths = cachePaths();
+        const idx = await readIndex();
+        const existing = new Map();
+        for (const it of Array.isArray(idx.items) ? idx.items : []) {
+          if (it && it.id) existing.set(String(it.id), it);
+        }
+        let sourceList = [];
+        for (const v of scanCandidatesCache.values()) sourceList.push(...(Array.isArray(v) ? v : []));
+        sourceList = sourceList.concat(Array.from(existing.values() || []));
+        const wanted = Array.from(new Set(Array.isArray(ids) ? ids.map(String) : []));
+        const selected = [];
+        for (const id of wanted) {
+          const cand = sourceList.find(c => c && String(c.id) === id);
+          if (cand) selected.push(cand);
+        }
+        const total = selected.length;
+        let done = 0;
+        let okCount = 0;
+        let failCount = 0;
+        const existingIds = new Set(existing.keys());
+        for (const cand of selected) {
+          if (t && t.cancelled) break;
+          const res = await copyOne(cand, cpaths, existingIds);
+          done++;
+          if (res && res.succeeded && res.indexItem) {
+            idx.items = Array.isArray(idx.items) ? idx.items : [];
+            idx.items.push(res.indexItem);
+            existingIds.add(String(cand.id));
+            okCount++;
+            win && win.webContents.send('cache-progress', {
+              taskId: tid,
+              done, total,
+              currentName: String(cand.name || cand.id || ''),
+              succeeded: true,
+            });
+          } else {
+            failCount++;
+            win && win.webContents.send('cache-progress', {
+              taskId: tid,
+              done, total,
+              currentName: String(cand.name || cand.id || ''),
+              succeeded: false,
+              error: res && res.reason,
+            });
+          }
+        }
+        idx.version = (Number(idx.version) || 1) + 1;
+        await writeIndex(idx);
+        win && win.webContents.send('cache-done', {
+          taskId: tid,
+          summary: { ok: okCount, fail: failCount, indexVersion: idx.version },
+        });
+      } catch (e) {
+        console.error('[cache] cache-selected-resources fatal:', e);
+        win && win.webContents.send('cache-done', {
+          taskId: tid,
+          summary: { ok: 0, fail: 0, indexVersion: 0 },
+          error: (e && e.message) || String(e),
+        });
+      } finally {
+        cacheCopyTasks.delete(tid);
+      }
     })();
     return { ok: true };
   });
