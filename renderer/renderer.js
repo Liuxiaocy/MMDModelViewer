@@ -198,16 +198,74 @@ function applyParam(group, key, value, prev) {
     if (key === 'dirIntensity')     { if (typeof dirLight !== 'undefined')     { dirLight.intensity = Number(value) || 0; } }
     if (key === 'fillIntensity')    { if (typeof fillLight !== 'undefined')    { fillLight.intensity = Number(value) || 0; } }
   } else if (group === 'physics' || group === 'ik') {
+    // 这些参数需要下一次 helper.add（重建 physics/ikSolver）才会生效：
+    // 这里立即尝试对 mmdHelper.objects 中当前 mesh 的 ikSolver/physics 做一次尽力修改，能改就改；
+    // 不能改的（重建级别）保持 PARAMS 值即可，下一次 loadModel / btn-stop / playVmd 会读取。
+    if (group === 'physics') {
+      // gravity 对 physics world（已启动的）重建成本高，保留在下一次 helper.add；此处只提示
+      if (key === 'gravity' || key === 'unitStep' || key === 'maxStepNum' || key === 'enabled' || key === 'autoDisableHeavy') {
+        try { setStatus(`物理参数「${key}」会在下一次加载模型/停止动作时应用`, 'warn'); } catch (_) { /* noop */ }
+      }
+    }
+    if (group === 'ik') {
+      // 若 ikSolver 已经存在（已经 add 进 mmdHelper），尝试把每根 ik 的 iteration/tolerance 覆盖
+      if (mmdHelper && currentMesh && mmdHelper.objects && mmdHelper.objects.has(currentMesh)) {
+        const obj = mmdHelper.objects.get(currentMesh);
+        const ikSolver = obj && obj.ikSolver;
+        if (ikSolver && Array.isArray(ikSolver.iks)) {
+          ikSolver.iks.forEach((ik) => {
+            if (key === 'iteration') { ik.iteration = Math.max(1, Math.floor(Number(value) || 1)); }
+            if (key === 'toleranceAngle') {
+              ik.minAngle = Math.max(0, Number(value) || 0);
+            }
+          });
+        }
+        if (key === 'enabled') {
+          mmdHelper.enabled.ik = !!value;
+        }
+      }
+    }
   } else if (group === 'anim') {
     if (key === 'speedScale') {
       try {
         if (speedRange) { speedRange.value = String(Math.max(0.1, Math.min(3, Number(value) || 1))); }
         if (speedVal) { speedVal.textContent = parseFloat(speedRange.value).toFixed(1) + 'x'; }
+        // 同步当前 mixer.timeScale（btn-play/pause 会覆盖它，这里保持一致）
+        if (mmdHelper && currentMesh && mmdHelper.objects && mmdHelper.objects.has(currentMesh)) {
+          const obj = mmdHelper.objects.get(currentMesh);
+          if (obj && obj.mixer) {
+            const s = parseFloat(speedRange.value) || 1;
+            obj.mixer.timeScale = s;
+          }
+        }
       } catch (_) { /* noop */ }
     }
-    if (key === 'loopAnimation') { /* TODO Task 11: obj.mixer._actions[] each action.loop = LoopOnce/LoopRepeat */ }
-    if (key === 'resetOnStop') { /* TODO Task 11: btn-stop 行为开关 */ }
-    if (key === 'afterglow') { /* TODO Task 11: 重建 MMDAnimationHelper({ afterglow }) */ }
+    if (key === 'loopAnimation') {
+      if (mmdHelper && currentMesh && mmdHelper.objects && mmdHelper.objects.has(currentMesh)) {
+        const obj = mmdHelper.objects.get(currentMesh);
+        const mixer = obj && obj.mixer;
+        if (mixer && mixer._actions && mixer._actions.length) {
+          const mode = value ? THREE.LoopRepeat : THREE.LoopOnce;
+          mixer._actions.forEach((act) => { if (act) act.loop = mode; });
+          // 重置到 0 时让 LoopOnce 重新进入「可播放一次」的状态
+          if (mixer._actions.length) {
+            const cur = mixer._actions[0];
+            if (cur) { cur.reset(); }
+          }
+        }
+      }
+    }
+    if (key === 'resetOnStop') {
+      // 记录在 PARAMS，btn-stop 读取；用户可见反馈
+      try { setStatus(value ? '停止时将回到 BindPose' : '停止时保持当前姿势', 'info'); } catch (_) { /* noop */ }
+    }
+    if (key === 'afterglow') {
+      // afterglow 是 MMDAnimationHelper.configuration 级别，需要重建 helper（或直接改 configuration）
+      if (mmdHelper && mmdHelper.configuration) {
+        mmdHelper.configuration.afterglow = Math.max(0, Number(value) || 0);
+        setStatus(`切动作余辉：${(Number(value) || 0).toFixed(2)}s`, 'info');
+      }
+    }
   }
 }
 function refreshOutlineSelection() {
@@ -232,6 +290,43 @@ function resetAllParams() {
     const [g, k] = gk.split('.');
     setParam(g, k, defaults[gk], { persist: true, apply: true });
   }
+}
+// 基于当前 PARAMS 构建 mmdHelper.add / playVmd fallback add 所需的 physics/ik/gravity/unitStep/maxStepNum
+function buildHelperOptions(mesh, extra = {}) {
+  const rbCount = (mesh && mesh.userData && mesh.userData.rigidBodies && mesh.userData.rigidBodies.length) || 0;
+  let physics = !!getParam('physics', 'enabled', true) && ammoReady;
+  if (physics && getParam('physics', 'autoDisableHeavy', true) && rbCount > 200) {
+    physics = false;
+    try { setStatus(`模型刚体 ${rbCount} 个过多，布料物理已自动关闭（腿部 IK 正常）`, 'warn'); } catch (_) { /* noop */ }
+  }
+  const gravityN = Math.max(0, Number(getParam('physics', 'gravity', 9.8)) || 0);
+  const unitStepStr = String(getParam('physics', 'unitStep', '1/60'));
+  const unitStep = (unitStepStr === '1/120') ? 1/120 : (unitStepStr === '1/30' ? 1/30 : 1/60);
+  const maxStepNum = Math.max(1, Math.floor(Number(getParam('physics', 'maxStepNum', 2)) || 1));
+  return Object.assign({
+    animation: undefined,
+    physics,
+    unitStep,
+    maxStepNum,
+    gravity: new THREE.Vector3(0, -gravityN * 10, 0),
+    resetPosition: true,
+    resetRotation: true,
+  }, extra || {});
+}
+// 重建 ikSolver 并同步 PARAM.ik 参数（供 playVmd 重建后调用）
+function syncIkSolverForMesh(mesh) {
+  if (!mmdHelper || !mesh || !mmdHelper.objects || !mmdHelper.objects.has(mesh)) return;
+  const obj = mmdHelper.objects.get(mesh);
+  const ikSolver = obj && obj.ikSolver;
+  if (!ikSolver || !Array.isArray(ikSolver.iks)) return;
+  const iter = Math.max(1, Math.floor(Number(getParam('ik', 'iteration', 50)) || 1));
+  const tol = Math.max(0, Number(getParam('ik', 'toleranceAngle', 0.08)) || 0);
+  const ikEnabled = !!getParam('ik', 'enabled', true);
+  ikSolver.iks.forEach((ik) => {
+    ik.iteration = iter;
+    ik.minAngle = tol;
+  });
+  if (mmdHelper.enabled) mmdHelper.enabled.ik = ikEnabled;
 }
 function loadRecent() {
   try {
@@ -1253,30 +1348,23 @@ async function loadModel(node) {
       });
     }
 
-    // 性能兜底：刚体数 > 200 自动关物理
     const rbCount = (mesh.userData.rigidBodies && mesh.userData.rigidBodies.length) || 0;
     const jnCount = (mesh.userData.joints && mesh.userData.joints.length) || 0;
-    let usePhysics = ammoReady;
-    if (usePhysics && rbCount > 200) {
-      usePhysics = false;
-      setStatus(`模型刚体 ${rbCount} 个过多，布料物理已自动关闭（腿部 IK 正常）`, 'warn');
-    }
 
-    mmdHelper.add(mesh, {
-      animation: undefined,            // 先不绑定动作，等 playVmd 调 _setupMeshAnimation
-      physics: usePhysics,
-      unitStep: 1 / 60,
-      maxStepNum: 2,
-      gravity: new THREE.Vector3(0, -9.8 * 10, 0),   // MMD 尺度毫米，×10 官方约定
-      resetPosition: true,
-      resetRotation: true,
+    // 用 PARAMS 生成 physics/ik/gravity/步进配置
+    const helperOpts = buildHelperOptions(mesh, {
+      animation: undefined,
     });
+    mmdHelper.add(mesh, helperOpts);
+    // 模型加载即同步一次 ikSolver（无动画时 ikSolver 也会被 _setupMeshAnimation 创建）
+    syncIkSolverForMesh(mesh);
 
     frameModel(mesh);
     showModelInfo(mesh, node);
     setupVmdList(mesh);
 
-    const extra = `${vmdFiles.length} 个动作可用 · IK✓ · 布料${usePhysics ? `✓ (${rbCount} 刚体/${jnCount} 弹簧)` : '✗'}`;
+    const physicsOk = !!helperOpts.physics;
+    const extra = `${vmdFiles.length} 个动作可用 · IK✓ · 布料${physicsOk ? `✓ (${rbCount} 刚体/${jnCount} 弹簧)` : '✗'}`;
     setStatus(`已加载：${node.name}`, 'info', extra);
   } catch (err) {
     setStatus('加载模型失败：' + (err && err.message || err), 'error');
@@ -1371,9 +1459,21 @@ async function playVmd(vmdNode, mesh, el) {
     // 物理保持不变）。如果 mesh 还没 add 进 helper，兜底走 add。
     if (mmdHelper && mesh && mmdHelper.objects && mmdHelper.objects.has(mesh)) {
       mmdHelper._setupMeshAnimation(mesh, clip);
+      syncIkSolverForMesh(mesh);
+      // 同步 loopAnimation 参数（新建 mixer 后会重置 loop 模式）
+      (function syncLoopAfterSetup() {
+        if (!mmdHelper || !mmdHelper.objects || !mmdHelper.objects.has(mesh)) return;
+        const obj = mmdHelper.objects.get(mesh);
+        const mixer = obj && obj.mixer;
+        if (!mixer || !mixer._actions || !mixer._actions.length) return;
+        const mode = !!getParam('anim', 'loopAnimation', true) ? THREE.LoopRepeat : THREE.LoopOnce;
+        mixer._actions.forEach((act) => { if (act) act.loop = mode; });
+      })();
     } else if (mmdHelper) {
       // 兜底（先 add 再 setup）
-      mmdHelper.add(mesh, { animation: clip, physics: ammoReady });
+      const opts = buildHelperOptions(mesh, { animation: clip });
+      mmdHelper.add(mesh, opts);
+      syncIkSolverForMesh(mesh);
     }
     currentAnimating = true;
 
@@ -1507,7 +1607,7 @@ $('btn-choose-dir').addEventListener('click', async () => {
 $('btn-play').addEventListener('click', () => {
   if (!mmdHelper || !currentMesh) return;
   const obj = mmdHelper.objects && mmdHelper.objects.get(currentMesh);
-  if (obj && obj.mixer) obj.mixer.timeScale = 1;
+  if (obj && obj.mixer) obj.mixer.timeScale = parseFloat(getParam('anim', 'speedScale', 1)) || 1;
   currentAnimating = true;
 });
 $('btn-pause').addEventListener('click', () => {
@@ -1520,15 +1620,13 @@ $('btn-stop').addEventListener('click', () => {
   if (mmdHelper && currentMesh) {
     // 从 helper 里 remove 后再 re-add（无 animation），相当于完全停止动作 + 回到 bind pose
     try { mmdHelper.remove(currentMesh); } catch (_) {}
-    mmdHelper.add(currentMesh, {
+    const doReset = !!getParam('anim', 'resetOnStop', true);
+    mmdHelper.add(currentMesh, buildHelperOptions(currentMesh, {
       animation: undefined,
-      physics: ammoReady && (currentMesh.userData.rigidBodies?.length || 0) <= 200,
-      unitStep: 1 / 60,
-      maxStepNum: 2,
-      gravity: new THREE.Vector3(0, -9.8 * 10, 0),
-      resetPosition: true,
-      resetRotation: true,
-    });
+      resetPosition: doReset,
+      resetRotation: doReset,
+    }));
+    syncIkSolverForMesh(currentMesh);
   }
   currentAnimating = false;
   refreshOutlineSelection();
