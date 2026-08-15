@@ -6,8 +6,10 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const seven = require('7zip-min');
+const sevenBin = require('7zip-bin');
 const unrar = require('node-unrar-js');
 
 const DEFAULT_ROOT = 'D:\\素材\\3D模型';
@@ -679,22 +681,63 @@ function registerIpc() {
       ? (src.sourcePath + '::' + src.archiveEntry)
       : src.sourcePath;
   }
+  // 解析 7za -slt 输出为 [{name, size}]
+  function parse7zSlt(str) {
+    if (!str) return [];
+    str = String(str).replace(/(\r\n|\n|\r)/gm, '\n');
+    const items = str.split(/^\s*$/m);
+    const res = [];
+    for (const item of items) {
+      if (!item || !item.trim()) continue;
+      const obj = {};
+      for (const line of item.split('\n')) {
+        const m = line.match(/^(\S[^=]*?)\s*=\s*(.*)$/);
+        if (!m) continue;
+        const key = m[1].trim();
+        const val = m[2].trim();
+        if (key === 'Path') obj.name = val;
+        else if (key === 'Size') obj.size = val;
+      }
+      if (obj.name) res.push(obj);
+    }
+    return res;
+  }
+  // 直接调用 7za（-sccUTF-8 强制 UTF-8 输出，解决 Windows 下中文条目名乱码）
+  function list7zEntries(archivePath) {
+    return new Promise((resolve) => {
+      execFile(sevenBin.path7za, ['l', '-slt', '-ba', '-sccUTF-8', archivePath],
+        { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
+        (err, stdout) => {
+          if (err) { console.error('[scan] 7za list failed:', archivePath, (err && err.message) || err); return resolve([]); }
+          try { resolve(parse7zSlt(stdout)); } catch (_) { resolve([]); }
+        });
+    });
+  }
   async function listArchiveEntries(archivePath) {
     try {
       if (!fs.existsSync(archivePath)) return [];
       const ext = path.extname(archivePath).toLowerCase();
       if (!ARCHIVE_EXTS.has(ext)) return [];
-      if (ext !== '.rar' && typeof seven.list === 'function') {
-        return await new Promise((resolve) => {
-          seven.list(archivePath, (err, list) => {
-            if (err) return resolve([]);
-            if (!Array.isArray(list)) return resolve([]);
-            resolve(list.map(it => ({
-              name: String(it.name || it || ''),
-              size: typeof it.size === 'number' ? it.size : null,
-            })));
+      if (ext !== '.rar') {
+        // 优先 7za -sccUTF-8（条目名编码正确）；失败则回退 7zip-min list
+        const via7za = await list7zEntries(archivePath);
+        if (via7za.length) return via7za.map(it => ({
+          name: String(it.name || ''),
+          size: typeof it.size === 'string' ? (Number(it.size) || null) : it.size,
+        }));
+        if (typeof seven.list === 'function') {
+          return await new Promise((resolve) => {
+            seven.list(archivePath, (err, list) => {
+              if (err) return resolve([]);
+              if (!Array.isArray(list)) return resolve([]);
+              resolve(list.map(it => ({
+                name: String(it.name || it || ''),
+                size: typeof it.size === 'number' ? it.size : null,
+              })));
+            });
           });
-        });
+        }
+        return [];
       }
       if (ext === '.rar') {
         try {
@@ -740,6 +783,7 @@ function registerIpc() {
 
   ipcMain.handle('start-resource-scan', async (evt, payload) => {
     const { roots, intoArchives = true } = payload || {};
+    console.log('[scan] start-resource-scan roots=', JSON.stringify(roots), 'intoArchives=', intoArchives);
     const taskId = 'scan_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
     const win = BrowserWindow.fromWebContents(evt.sender);
     scanTasks.set(taskId, { cancelled: false, startTime: Date.now() });
@@ -747,7 +791,17 @@ function registerIpc() {
     (async () => {
       const task = scanTasks.get(taskId);
       try {
-        const rootsArr = Array.isArray(roots) ? roots : [];
+        // 根目录去重：若某 root 是另一 root 的子目录，则递归已覆盖，跳过它
+        const rootsRaw = Array.isArray(roots) ? roots : [];
+        const rootsArr = [];
+        for (const r of rootsRaw) {
+          const abs = path.resolve(r);
+          const isChild = rootsArr.some((parent) => {
+            const rel = path.relative(parent, abs);
+            return rel && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+          });
+          if (!isChild) rootsArr.push(abs);
+        }
         if (!rootsArr.length) {
           win && win.webContents.send('scan-done', {
             taskId, candidates: [], totalCount: 0, totalSize: 0,
@@ -774,8 +828,11 @@ function registerIpc() {
         let done = 0;
         const candidates = [];
         let totalSize = 0;
+        const seenCandidateIds = new Set();
         const pushCandidate = ({ name, ext, sourcePath, sourceType, archiveEntry, sizeEstimate, type }) => {
           const id = itemId(type, candidateKey({ sourcePath, archiveEntry }));
+          if (seenCandidateIds.has(id)) return; // 同一资源只保留一条
+          seenCandidateIds.add(id);
           candidates.push({ id, name, ext, sourcePath, sourceType, archiveEntry, sizeEstimate, type });
           totalSize += Number(sizeEstimate) || 0;
         };
@@ -827,6 +884,7 @@ function registerIpc() {
         }
         const cancelled = task && task.cancelled;
         if (!cancelled) scanCandidatesCache.set(taskId, candidates);
+        console.log('[scan] done candidates=', candidates.length, 'totalSize=', totalSize, 'cancelled=', cancelled, 'roots=', JSON.stringify(rootsArr));
         win && win.webContents.send('scan-done', {
           taskId,
           candidates,
@@ -875,6 +933,22 @@ function registerIpc() {
     }
     return null;
   }
+  // 在目录树中按扩展名集合递归查找所有文件
+  async function findFilesByExt(dir, extSet) {
+    const out = [];
+    const stack = [dir];
+    while (stack.length) {
+      const cur = stack.pop();
+      let ents;
+      try { ents = await fsp.readdir(cur, { withFileTypes: true }); } catch (_) { continue; }
+      for (const ent of ents) {
+        const full = path.join(cur, ent.name);
+        if (ent.isDirectory()) stack.push(full);
+        else if (ent.isFile() && extSet.has(path.extname(ent.name).toLowerCase())) out.push(full);
+      }
+    }
+    return out;
+  }
   async function copyOne(candidate, cpaths, existingIds) {
     const { id, type, name, ext, sourcePath, sourceType, archiveEntry } = candidate;
     if (existingIds.has(String(id))) {
@@ -896,7 +970,19 @@ function registerIpc() {
       } else if (sourceType === 'archive') {
         const dest = await extractArchive(sourcePath);
         tmpDirToClean = dest;
-        const found = await findFileInDirCaseInsensitive(dest, archiveEntry);
+        let found = await findFileInDirCaseInsensitive(dest, archiveEntry);
+        if (!found && archiveEntry) {
+          // 条目名可能因编码差异不匹配：按扩展名递归回退
+          const extSet = type === 'motion'
+            ? new Set(['.vmd', '.vpd'])
+            : new Set(['.pmx', '.pmd']);
+          const byExt = await findFilesByExt(dest, extSet);
+          if (byExt.length === 1) found = byExt[0];
+          else if (byExt.length > 1) {
+            const base = path.basename(String(archiveEntry || '')).toLowerCase();
+            found = byExt.find(f => path.basename(f).toLowerCase() === base) || null;
+          }
+        }
         if (!found) {
           return { succeeded: false, skipped: false, reason: 'archive_entry_not_found:' + (archiveEntry || '') };
         }
@@ -939,6 +1025,7 @@ function registerIpc() {
 
   ipcMain.handle('cache-selected-resources', async (_e, payload) => {
     const { taskId, ids } = payload || {};
+    console.log('[cache] cache-selected-resources called taskId=', taskId, 'ids=', Array.isArray(ids) ? ids.length : 0);
     const tid = String(taskId || ('copy_' + Date.now().toString(36)));
     const win = BrowserWindow.fromWebContents(_e.sender);
     cacheCopyTasks.set(tid, { cancelled: false });
@@ -961,6 +1048,7 @@ function registerIpc() {
           const cand = sourceList.find(c => c && String(c.id) === id);
           if (cand) selected.push(cand);
         }
+        console.log('[cache] cache copy task: sourceList=', sourceList.length, 'wanted=', wanted.length, 'selected=', selected.length);
         const total = selected.length;
         let done = 0;
         let okCount = 0;
@@ -969,8 +1057,10 @@ function registerIpc() {
         const existingIds = new Set(existing.keys());
         for (const cand of selected) {
           if (t && t.cancelled) break;
+          console.log('[cache] copy #' + (done + 1) + '/' + total, cand.type, cand.name, 'srcType=' + cand.sourceType, 'entry=' + String(cand.archiveEntry || ''));
           const res = await copyOne(cand, cpaths, existingIds);
           done++;
+          console.log('[cache] copy result #' + done, cand.name, '->', res ? (res.skipped ? 'skip' : res.succeeded ? 'ok' : 'FAIL:' + res.reason) : 'NULL');
           if (res && res.skipped) {
             // 已缓存：不算失败，也不重复写 index
             skipCount++;
@@ -1093,6 +1183,38 @@ async function runSmokeTest() {
         `!!(window.mmdAPI && window.mmdAPI.scanDir && window.mmdAPI.extractArchive && window.mmdAPI.mmdUrl)`
       );
       check('preload-api', apiOk, 'window.mmdAPI 完整');
+
+      // 4.5 缓存扫描完整链路：renderer 发起 startResourceScan -> 主进程扫描 -> scan-done 事件回传
+      try {
+        const scanCode = [
+          '(async () => {',
+          '  try {',
+          '    const [d, m] = await Promise.all([window.mmdAPI.getDefaultRoot(), window.mmdAPI.getMotionRoot()]);',
+          '    const roots = [];',
+          '    if (d && d.data) roots.push(d.data);',
+          '    if (m && m.data && m.data !== d.data) roots.push(m.data);',
+          '    const result = await new Promise((resolve) => {',
+          '      const timer = setTimeout(() => resolve({ error: "timeout 60s" }), 60000);',
+          '      window.mmdAPI.onScanDone((p) => { clearTimeout(timer); resolve(p); });',
+          '      window.mmdAPI.startResourceScan({ roots, intoArchives: true }).catch((e) => {',
+          '        clearTimeout(timer); resolve({ error: "startResourceScan: " + String(e && e.message || e) });',
+          '      });',
+          '    });',
+          '    return { roots, result };',
+          '  } catch (e) { return { error: String(e && e.message || e) }; }',
+          '})()',
+        ].join('\n');
+        const scanRes = await mainWindow.webContents.executeJavaScript(scanCode);
+        const r = scanRes && scanRes.result;
+        const ok = r && !r.error && Array.isArray(r.candidates) && r.candidates.length > 0;
+        const info = r && r.error
+          ? r.error
+          : (r && Array.isArray(r.candidates) ? `发现 ${r.candidates.length} 个候选（totalCount=${r.totalCount}）` : 'no result');
+        check('cache-scan-chain', ok, info);
+        console.log('[smoke] cache-scan roots=', JSON.stringify(scanRes && scanRes.roots), '->', info);
+      } catch (e) {
+        check('cache-scan-chain', false, String(e && e.message || e));
+      }
 
       // 5. mmd:// URL 构造
       const urlOk = await mainWindow.webContents.executeJavaScript(

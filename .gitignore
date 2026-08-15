@@ -1,9 +1,18 @@
 node_modules/
 dist/
 dist-smoke/
+dist-build/
 .npm-cache/
 .electron-cache/
 renderer/bundle.js
 renderer/bundle.js.map
 smoke-result.json
 *.log
+
+# 本地测试素材与解压产物（勿提交）
+AONMPB/
+TEX/
+海伦魅魔皮/
+*.pmx
+*.pmd
+使用说明 read me (CN, JP, EN).txt

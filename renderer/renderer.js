@@ -1863,13 +1863,30 @@ function bindCacheEventsOnce() {
       } else {
         cacheState.lastCandidates = Array.isArray(p.candidates) ? p.candidates : [];
         const cachedIds = new Set((cacheState.items || []).map(x => x.id));
-        let cachedCount = 0;
-        cacheState.lastCandidates.forEach((c) => { if (cachedIds.has(c.id)) cachedCount++; });
         if (cacheState.lastCandidates.length === 0) {
           setStatus(`扫描完成：没有发现 PMX/PMD/VMD/VPD 资源（共处理 ${p.totalCount} 个候选）`, 'warn');
         } else {
-          setStatus(`扫描完成：发现 ${p.totalCount} 个资源（${fmtSize(p.totalSize || 0)}），其中 ${cachedCount} 个已缓存`, 'info');
-          openCandidatePickDialog();
+          // 自动缓存模式：未超量（<500 项 且 <500MB）则静默自动缓存全部新资源，超量才弹候选清单确认
+          const totalCount = Number(p.totalCount) || cacheState.lastCandidates.length;
+          const totalSize = Number(p.totalSize) || 0;
+          const OVER_COUNT = 500;
+          const OVER_SIZE = 500 * 1024 * 1024;
+          if (totalCount >= OVER_COUNT || totalSize >= OVER_SIZE) {
+            setStatus(`扫描完成：发现 ${totalCount} 个资源（${fmtSize(totalSize)}），超出自动缓存阈值，请在候选清单中勾选`, 'info');
+            openCandidatePickDialog();
+          } else {
+            const uncachedIds = cacheState.lastCandidates
+              .filter((c) => !cachedIds.has(c.id))
+              .map((c) => c.id);
+            if (!uncachedIds.length) {
+              setStatus(`扫描完成：${totalCount} 个资源均已缓存`, 'info');
+              await refreshCacheItems();
+              renderCacheTab();
+            } else {
+              setStatus(`扫描完成：自动缓存 ${uncachedIds.length} 个新资源（共 ${totalCount} 个，${fmtSize(totalSize)}）…`, 'info');
+              await cacheCandidates(uncachedIds);
+            }
+          }
         }
       }
     });
@@ -2138,6 +2155,7 @@ async function startAutoCacheScan() {
   const roots = [];
   if (defaultRootPath) roots.push(defaultRootPath);
   if (motionRootPath && motionRootPath !== defaultRootPath) roots.push(motionRootPath);
+  console.log('[cache] startAutoCacheScan roots=', JSON.stringify(roots), 'defaultRootPath=', defaultRootPath, 'motionRootPath=', motionRootPath);
   if (!roots.length) { setStatus('没有可扫描的根目录', 'warn'); return; }
   cacheState.scanning = true;
   cacheState.lastCandidates = [];
@@ -2202,7 +2220,7 @@ async function renderCacheTab() {
   renderCacheToolbar();
   const filtered = getFilteredCacheItems();
   if (!filtered.length) {
-    grid.innerHTML = '<div class="placeholder">暂无缓存。打开工具栏「自动识别缓存」开关开始扫描。</div>';
+    grid.innerHTML = '<div class="placeholder">暂无缓存资源。启动后已在后台自动识别并缓存模型/动作，稍后刷新即可看到；也可点击工具栏「自动识别缓存」开关手动重新扫描。</div>';
     return;
   }
   grid.innerHTML = '';
@@ -2290,12 +2308,17 @@ function renderCacheToolbar() {
   if (ba) ba.addEventListener('click', () => doClear('all'));
 }
 // 顶栏自动缓存开关监听
+const AUTOCACHE_KEY = 'mmdviewer_autocache_v1';
 function bindToolbarAutoCacheToggle() {
   const tgl = $('tgl-auto-cache');
   if (!tgl || tgl.dataset.bound === '1') return;
   tgl.dataset.bound = '1';
-  // 启动时不自动开启；点击后立即执行一次扫描（下次点击重新扫描，可多次触发）
+  // 初始状态：默认开启（首次启动即自动扫描并缓存），状态持久化到 localStorage
+  let saved = '1';
+  try { saved = localStorage.getItem(AUTOCACHE_KEY); } catch (_) { /* noop */ }
+  tgl.checked = saved !== '0';
   tgl.addEventListener('change', async (e) => {
+    try { localStorage.setItem(AUTOCACHE_KEY, e.target.checked ? '1' : '0'); } catch (_) { /* noop */ }
     if (e.target.checked) {
       // 切到缓存 Tab 便于观察
       const want = document.querySelector('#info-panel .tab-btn[data-tab="cache"]');
@@ -2325,10 +2348,19 @@ function hookLoadModelForThumb() {
   }, 1000);
 }
 // 初始化一次（在 init() 末尾）
-function initCacheTabModule() {
+let cacheAutoScanStarted = false;
+function initCacheTabModule(fromInit = false) {
   bindCacheEventsOnce();
   bindToolbarAutoCacheToggle();
   hookLoadModelForThumb();
+  // 启动时自动扫描并缓存（开关默认开启；用户手动关闭后不再自动触发）。
+  // 仅在 init() 完成后（根目录已就绪）触发一次。
+  if (!fromInit || cacheAutoScanStarted) return;
+  cacheAutoScanStarted = true;
+  const tgl = $('tgl-auto-cache');
+  if (tgl && tgl.checked) {
+    setTimeout(() => { if (tgl && tgl.checked) startAutoCacheScan(); }, 1500);
+  }
 }
 // 立即注册：不阻塞 init；init 尾部也会重复调用一次，内部防重
 initCacheTabModule();
@@ -2432,7 +2464,7 @@ async function init() {
     }
     updateLibCounts();
     updateNavButtons();
-    initCacheTabModule();
+    initCacheTabModule(true);
   } catch (err) {
     setStatus('初始化失败：' + err.message, 'error');
   }
