@@ -1611,23 +1611,510 @@ if (speedRange) {
     setParam('anim', 'speedScale', v, { persist: true, apply: false });
   });
 }
-// ---------- 缓存资源 Tab 渲染桩（Task 8 完成真实实现） ----------
-async function renderCacheTab() {
-  const grid = $('cache-grid');
-  const sizeBadge = $('cache-size');
-  if (!grid) return;
-  try {
-    const info = await (api && api.getCacheDirInfo ? api.getCacheDirInfo() : Promise.resolve(null));
-    if (sizeBadge) {
-      sizeBadge.textContent = info ? fmtSize(Number(info.totalSize) || 0) : '—';
-    }
-    if (grid.childElementCount === 0 || (grid.children.length === 1 && grid.children[0].classList.contains('placeholder'))) {
-      grid.innerHTML = '<div class="placeholder">暂无缓存。打开工具栏「自动识别缓存」开关开始扫描。</div>';
-    }
-  } catch (_) {
-    if (sizeBadge) sizeBadge.textContent = '—';
+// ---------- 缓存资源 Tab UI + 扫描/复制/清理/缩略图 ----------
+const cacheState = {
+  items: [],            // 来自 index.json
+  filter: '',
+  type: 'all',          // all | models | motions
+  scanning: false,
+  scanTaskId: null,
+  scanProgress: null,
+  lastCandidates: [],   // 扫描结果候选（供勾选）
+  lastCopySummary: null,
+};
+let cacheEventsBound = false;
+function bindCacheEventsOnce() {
+  if (cacheEventsBound || !api) return;
+  cacheEventsBound = true;
+  if (typeof api.onScanProgress === 'function') {
+    api.onScanProgress((p) => {
+      if (p && cacheState.scanTaskId && p.taskId === cacheState.scanTaskId) {
+        cacheState.scanProgress = p;
+        updateScanToast();
+      }
+    });
+  }
+  if (typeof api.onScanDone === 'function') {
+    api.onScanDone(async (p) => {
+      if (!p || !cacheState.scanTaskId || p.taskId !== cacheState.scanTaskId) return;
+      cacheState.scanning = false;
+      cacheState.scanProgress = null;
+      hideScanToast();
+      if (p.error) {
+        setStatus('扫描失败：' + p.error, 'error');
+      } else if (p.cancelled) {
+        setStatus('扫描已取消', 'warn');
+      } else {
+        cacheState.lastCandidates = Array.isArray(p.candidates) ? p.candidates : [];
+        const cachedIds = new Set((cacheState.items || []).map(x => x.id));
+        let cachedCount = 0;
+        cacheState.lastCandidates.forEach((c) => { if (cachedIds.has(c.id)) cachedCount++; });
+        if (cacheState.lastCandidates.length === 0) {
+          setStatus(`扫描完成：没有发现 PMX/PMD/VMD/VPD 资源（共处理 ${p.totalCount} 个候选）`, 'warn');
+        } else {
+          setStatus(`扫描完成：发现 ${p.totalCount} 个资源（${fmtSize(p.totalSize || 0)}），其中 ${cachedCount} 个已缓存`, 'info');
+          openCandidatePickDialog();
+        }
+      }
+    });
+  }
+  if (typeof api.onCacheProgress === 'function') {
+    api.onCacheProgress((p) => {
+      if (!p) return;
+      showCopyProgressToast(p);
+    });
+  }
+  if (typeof api.onCacheDone === 'function') {
+    api.onCacheDone(async (p) => {
+      if (!p) return;
+      cacheState.lastCopySummary = p.summary || null;
+      hideCopyProgressToast();
+      if (p.error) {
+        setStatus('缓存复制失败：' + p.error, 'error');
+      } else {
+        const s = p.summary || { ok: 0, fail: 0 };
+        setStatus(`缓存完成：成功 ${s.ok}，失败 ${s.fail}`, s.fail > 0 ? 'warn' : 'success');
+      }
+      await refreshCacheItems();
+      renderCacheTab();
+    });
   }
 }
+async function refreshCacheItems() {
+  if (!api || typeof api.getCacheIndex !== 'function') return;
+  try {
+    const r = await api.getCacheIndex();
+    cacheState.items = ((r && r.index && Array.isArray(r.index.items)) ? r.index.items : []).slice();
+  } catch (_) { cacheState.items = []; }
+}
+function updateCacheSizeBadge() {
+  const badge = $('cache-size');
+  if (!badge) return;
+  const total = (cacheState.items || []).reduce((s, it) => s + (Number(it.cacheSize) || 0), 0);
+  badge.textContent = fmtSize(total);
+}
+function getFilteredCacheItems() {
+  const kw = String(cacheState.filter || '').trim().toLowerCase();
+  const t = cacheState.type || 'all';
+  return (cacheState.items || []).filter((it) => {
+    if (!it) return false;
+    if (t === 'models' && it.type !== 'model') return false;
+    if (t === 'motions' && it.type !== 'motion') return false;
+    if (kw) {
+      const hay = String(it.name || '').toLowerCase() + ' ' + String(it.ext || '').toLowerCase();
+      if (hay.indexOf(kw) < 0) return false;
+    }
+    return true;
+  });
+}
+function cacheThumbUrl(it) {
+  // it.thumb 形如 thumbs/xxx.png，拼接为 mmd://local/<cacheRoot>/thumbs/xxx.png
+  if (!it || !it.thumb) return null;
+  return api && typeof api.mmdUrl === 'function' && window.__cacheRootAbs
+    ? api.mmdUrl(require_path_join_fallback(window.__cacheRootAbs, String(it.thumb)))
+    : null;
+}
+// 简化 path.join：因为 mmdUrl 只要 / 分隔；跨盘符场景交由 mmdUrl 处理
+function require_path_join_fallback(a, b) {
+  const x = String(a || '').replace(/\\/g, '/');
+  const y = String(b || '').replace(/\\/g, '/').replace(/^\//, '');
+  return x.replace(/\/$/, '') + '/' + y;
+}
+// 扫描候选对话框（玻璃态 modal，用 CSS 中已存在的 .modal/.modal-card 样式）
+let candidateDialogEl = null;
+function openCandidatePickDialog() {
+  const cands = Array.isArray(cacheState.lastCandidates) ? cacheState.lastCandidates : [];
+  if (!cands.length) return;
+  const cachedIds = new Set((cacheState.items || []).map(x => x.id));
+  const root = document.createElement('div');
+  root.className = 'modal hidden';
+  root.innerHTML = `
+    <div class="modal-card" style="width: 720px; max-width: 92vw; max-height: 80vh;">
+      <div class="modal-title">
+        <div>
+          <div style="font-weight:700;font-size:16px;">识别到以下资源</div>
+          <div style="color:var(--text-muted);font-size:12px;margin-top:2px;">共 ${cands.length} 个 · ${fmtSize(cands.reduce((s,c)=>s+(Number(c.sizeEstimate)||0),0))}；灰色 = 已缓存</div>
+        </div>
+        <button class="modal-close" data-act="close">×</button>
+      </div>
+      <div style="display:flex;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);align-items:center;flex-wrap:wrap;">
+        <input class="filter-input" id="cand-filter" placeholder="搜索候选…" style="flex:1;min-width:180px;" />
+        <div class="segmented" role="group">
+          <button class="seg active" data-cand-type="all">全部</button>
+          <button class="seg" data-cand-type="models">🧊 模型</button>
+          <button class="seg" data-cand-type="motions">🎬 动作</button>
+        </div>
+        <button class="btn btn-small" id="cand-select-all">全选新增</button>
+      </div>
+      <div class="modal-body">
+        <div id="cand-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;"></div>
+      </div>
+      <div class="modal-footer">
+        <span id="cand-stat" style="color:var(--text-muted);font-size:12px;"></span>
+        <div style="display:flex;gap:8px;margin-left:auto;">
+          <button class="btn btn-small" data-act="close">取消</button>
+          <button class="btn btn-small btn-primary" id="cand-cache-btn">缓存所选（0）</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(root);
+  candidateDialogEl = root;
+  let candType = 'all';
+  let candFilter = '';
+  const checked = new Set();
+  cands.forEach((c) => { if (!cachedIds.has(c.id)) checked.add(c.id); });
+  const candList = root.querySelector('#cand-list');
+  const candStat = root.querySelector('#cand-stat');
+  const cacheBtn = root.querySelector('#cand-cache-btn');
+  function render() {
+    const kw = candFilter.trim().toLowerCase();
+    const list = cands.filter((c) => {
+      if (candType === 'models' && c.type !== 'model') return false;
+      if (candType === 'motions' && c.type !== 'motion') return false;
+      if (kw) {
+        const hay = String(c.name || '').toLowerCase() + ' ' + String(c.ext || '').toLowerCase();
+        if (hay.indexOf(kw) < 0) return false;
+      }
+      return true;
+    });
+    candList.innerHTML = '';
+    list.forEach((c) => {
+      const isCached = cachedIds.has(c.id);
+      const card = document.createElement('label');
+      card.className = 'cache-card' + (isCached ? ' cached-disabled' : '');
+      card.style.cursor = isCached ? 'default' : 'pointer';
+      const idAttr = `cand_${c.id}`;
+      card.innerHTML = `
+        <input type="checkbox" value="${c.id}" ${checked.has(c.id) ? 'checked' : ''} ${isCached ? 'disabled' : ''} style="display:none;">
+        <div style="width:100%;aspect-ratio:1/1;background:var(--bg-sidebar);border:1px solid var(--border);border-radius:var(--r-md);display:flex;align-items:center;justify-content:center;font-size:28px;">
+          ${c.type === 'model' ? '🧊' : '🎬'}
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(String(c.name || ''))}">${escapeHtml(String(c.name || c.id || ''))}</div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);">
+          <span>${String(c.ext || '').toUpperCase()}</span>
+          <span>${c.sourceType === 'archive' ? '📦' : '📁'} ${typeof c.sizeEstimate === 'number' ? fmtSize(c.sizeEstimate) : '—'}</span>
+        </div>
+        ${isCached ? '<div style="font-size:10px;color:var(--text-muted);">已缓存</div>' : ''}
+      `;
+      if (!isCached) {
+        const input = card.querySelector('input');
+        card.addEventListener('click', (e) => {
+          if (e.target.tagName === 'INPUT') return;
+          input.checked = !input.checked;
+          if (input.checked) checked.add(c.id); else checked.delete(c.id);
+          updateStat();
+        });
+        input.addEventListener('change', () => {
+          if (input.checked) checked.add(c.id); else checked.delete(c.id);
+          updateStat();
+        });
+      }
+      candList.appendChild(card);
+    });
+    updateStat();
+  }
+  function updateStat() {
+    const selectedIds = Array.from(checked);
+    const selItems = cands.filter(c => selectedIds.includes(c.id));
+    const totalSz = selItems.reduce((s, c) => s + (Number(c.sizeEstimate) || 0), 0);
+    candStat.textContent = `已选 ${selItems.length} 个 · ${fmtSize(totalSz)}`;
+    cacheBtn.textContent = `缓存所选（${selItems.length}）`;
+    cacheBtn.disabled = selItems.length === 0;
+  }
+  root.querySelector('#cand-filter').addEventListener('input', (e) => { candFilter = e.target.value; render(); });
+  root.querySelectorAll('[data-cand-type]').forEach((b) => {
+    b.addEventListener('click', () => {
+      root.querySelectorAll('[data-cand-type]').forEach((x) => x.classList.toggle('active', x === b));
+      candType = b.dataset.candType;
+      render();
+    });
+  });
+  root.querySelector('#cand-select-all').addEventListener('click', () => {
+    cands.forEach((c) => { if (!cachedIds.has(c.id)) checked.add(c.id); });
+    render();
+  });
+  root.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', closeCandidatePickDialog));
+  root.addEventListener('click', (e) => { if (e.target === root) closeCandidatePickDialog(); });
+  cacheBtn.addEventListener('click', async () => {
+    const ids = Array.from(checked);
+    if (!ids.length) return;
+    closeCandidatePickDialog();
+    await cacheCandidates(ids);
+  });
+  root.classList.remove('hidden');
+  render();
+}
+function closeCandidatePickDialog() {
+  if (candidateDialogEl && candidateDialogEl.parentNode) candidateDialogEl.parentNode.removeChild(candidateDialogEl);
+  candidateDialogEl = null;
+}
+async function cacheCandidates(ids) {
+  if (!api || typeof api.cacheSelectedResources !== 'function') return;
+  const taskId = 'copy_' + Date.now().toString(36);
+  await api.cacheSelectedResources({ taskId, ids: Array.isArray(ids) ? ids : [] });
+}
+// 扫描进度 toast（底部覆盖层，使用 CSS 中 .progress-track 等样式）
+let scanToastEl = null;
+function updateScanToast() {
+  const p = cacheState.scanProgress;
+  if (!scanToastEl || !p) return;
+  const pct = p.total ? Math.min(100, Math.round(100 * (p.done / p.total))) : 0;
+  scanToastEl.querySelector('.pt-text').textContent = `扫描中 ${p.done}/${p.total}（${pct}%）`;
+  scanToastEl.querySelector('.pt-fill').style.width = pct + '%';
+  scanToastEl.querySelector('.pt-detail').textContent = String(p.currentDir || '');
+}
+function showScanToast() {
+  if (scanToastEl) return;
+  const el = document.createElement('div');
+  el.className = 'progress-toast';
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div style="font-weight:600;">🔍 资源识别中</div>
+      <div class="pt-text" style="color:var(--text-muted);font-size:12px;"></div>
+      <button class="btn btn-small" id="scan-cancel" style="margin-left:auto;">取消</button>
+    </div>
+    <div class="progress-track" style="margin-top:8px;"><div class="pt-fill" style="width:0%"></div></div>
+    <div class="pt-detail" style="font-size:11px;color:var(--text-muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>`;
+  document.body.appendChild(el);
+  scanToastEl = el;
+  el.querySelector('#scan-cancel').addEventListener('click', async () => {
+    if (cacheState.scanTaskId && api && api.cancelResourceScan) await api.cancelResourceScan(cacheState.scanTaskId);
+  });
+}
+function hideScanToast() { if (scanToastEl && scanToastEl.parentNode) scanToastEl.parentNode.removeChild(scanToastEl); scanToastEl = null; }
+// 复制进度 toast
+let copyToastEl = null;
+let copyToastTimer = null;
+function showCopyProgressToast(p) {
+  if (!p) return;
+  if (!copyToastEl) {
+    const el = document.createElement('div');
+    el.className = 'progress-toast';
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="font-weight:600;">💾 正在缓存到本地</div>
+        <div class="pt-text" style="color:var(--text-muted);font-size:12px;"></div>
+      </div>
+      <div class="progress-track" style="margin-top:8px;"><div class="pt-fill" style="width:0%"></div></div>
+      <div class="pt-detail" style="font-size:11px;color:var(--text-muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>`;
+    document.body.appendChild(el);
+    copyToastEl = el;
+  }
+  const pct = p.total ? Math.min(100, Math.round(100 * (p.done / p.total))) : 0;
+  copyToastEl.querySelector('.pt-text').textContent = `${p.done}/${p.total}（${pct}%）`;
+  copyToastEl.querySelector('.pt-fill').style.width = pct + '%';
+  copyToastEl.querySelector('.pt-detail').textContent = (p.succeeded ? '✅ ' : p.error ? '⚠️ ' : '') + String(p.currentName || '');
+  if (copyToastTimer) clearTimeout(copyToastTimer);
+}
+function hideCopyProgressToast() {
+  if (copyToastTimer) clearTimeout(copyToastTimer);
+  copyToastTimer = setTimeout(() => {
+    if (copyToastEl && copyToastEl.parentNode) copyToastEl.parentNode.removeChild(copyToastEl);
+    copyToastEl = null;
+  }, 2000);
+}
+async function startAutoCacheScan() {
+  if (!api) return;
+  if (cacheState.scanning) return;
+  bindCacheEventsOnce();
+  await refreshCacheItems();
+  const roots = [];
+  if (defaultRootPath) roots.push(defaultRootPath);
+  if (motionRootPath && motionRootPath !== defaultRootPath) roots.push(motionRootPath);
+  if (!roots.length) { setStatus('没有可扫描的根目录', 'warn'); return; }
+  cacheState.scanning = true;
+  cacheState.lastCandidates = [];
+  showScanToast();
+  updateScanToast();
+  try {
+    const r = await api.startResourceScan({ roots, intoArchives: true });
+    cacheState.scanTaskId = r && r.taskId;
+  } catch (e) {
+    cacheState.scanning = false; hideScanToast();
+    setStatus('启动扫描失败：' + (e && e.message || e), 'error');
+  }
+}
+// 缩略图写入：在成功加载模型后，截一张 256x256 PNG 写回缓存索引（仅缓存项写入）
+function maybeWriteCacheThumbForCurrent() {
+  if (!currentModelPath || !api || typeof api.writeCacheThumb !== 'function') return;
+  const item = (cacheState.items || []).find((it) => {
+    if (!it || !it.cachePath) return false;
+    try {
+      const rel = String(it.cachePath).replace(/\\/g, '/');
+      const base = rel.split('/').pop() || '';
+      if (!base) return false;
+      return String(currentModelPath).replace(/\\/g, '/').endsWith('/' + base);
+    } catch (_) { return false; }
+  });
+  if (!item) return;
+  try {
+    const off = document.createElement('canvas');
+    off.width = 256; off.height = 256;
+    const ctx = off.getContext('2d');
+    // 将当前 canvas 缩绘到 off（保留 aspect）
+    const cw = canvas.width, ch = canvas.height;
+    if (!cw || !ch) return;
+    const scale = Math.min(off.width / cw, off.height / ch);
+    const dw = cw * scale, dh = ch * scale;
+    const dx = (off.width - dw) / 2, dy = (off.height - dh) / 2;
+    ctx.fillStyle = '#F0F1F5';
+    ctx.fillRect(0, 0, off.width, off.height);
+    ctx.drawImage(canvas, dx, dy, dw, dh);
+    const dataUrl = off.toDataURL('image/png');
+    api.writeCacheThumb({ id: item.id, base64Png: dataUrl }).then(() => {
+      // 写入成功后刷新缩略图引用
+      refreshCacheItems().then(renderCacheTab);
+    }).catch((_) => { /* noop */ });
+  } catch (_) { /* noop */ }
+}
+// 真实的 renderCacheTab：列表 + 过滤 + 删除 + 清空 + 写入缩略图钩子
+async function renderCacheTab() {
+  bindCacheEventsOnce();
+  const grid = $('cache-grid');
+  if (!grid) return;
+  const sizeBadge = $('cache-size');
+  // 预填 cacheRootAbs（用于缩略图 mmd:// 构造）
+  if (!window.__cacheRootAbs && api && api.getCacheDirInfo) {
+    try {
+      const info = await api.getCacheDirInfo();
+      if (info && info.root) window.__cacheRootAbs = info.root;
+    } catch (_) { /* noop */ }
+  }
+  if (!cacheState.items.length) await refreshCacheItems();
+  updateCacheSizeBadge();
+  renderCacheToolbar();
+  const filtered = getFilteredCacheItems();
+  if (!filtered.length) {
+    grid.innerHTML = '<div class="placeholder">暂无缓存。打开工具栏「自动识别缓存」开关开始扫描。</div>';
+    return;
+  }
+  grid.innerHTML = '';
+  filtered.forEach((it) => {
+    const card = document.createElement('div');
+    card.className = 'cache-card';
+    const isModel = it.type === 'model';
+    const thumb = cacheThumbUrl(it);
+    card.innerHTML = `
+      <div class="cc-thumb" data-abs="${it.cachePath ? String(it.cachePath) : ''}">
+        ${thumb
+          ? `<img src="${thumb}" alt="${escapeHtml(String(it.name || ''))}" onerror="this.remove(); this.parentElement.innerHTML='<div class=\\'cc-emoji\\'>${isModel ? '🧊' : '🎬'}</div>';" />`
+          : `<div class="cc-emoji">${isModel ? '🧊' : '🎬'}</div>`}
+      </div>
+      <div class="cc-name" title="${escapeHtml(String(it.name || ''))}">${escapeHtml(String(it.name || ''))}</div>
+      <div class="cc-meta">
+        <span>${String(it.ext || '').toUpperCase()}</span>
+        <span>${fmtSize(Number(it.cacheSize) || 0)}</span>
+      </div>
+      <div class="cc-actions">
+        <button class="btn btn-tiny cc-load">${isModel ? '加载' : '应用'}</button>
+        <button class="btn btn-tiny btn-danger cc-del">删除</button>
+      </div>`;
+    // 加载/应用：缓存项用相对路径拼 cacheRoot 取模型/动作的绝对路径
+    card.querySelector('.cc-load').addEventListener('click', () => {
+      if (!window.__cacheRootAbs) { setStatus('缓存根目录未知，请稍后再试', 'warn'); return; }
+      const abs = require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '');
+      if (it.type === 'model') {
+        selectFile({ path: abs, name: it.name, type: 'model', size: it.cacheSize });
+      } else if (it.type === 'motion' && currentMesh) {
+        playVmd({ path: abs, name: it.name, size: it.cacheSize }, currentMesh, null);
+      } else if (it.type === 'motion') {
+        setStatus('请先加载一个 PMX/PMD 模型，再应用此动作', 'warn');
+      }
+    });
+    card.querySelector('.cc-del').addEventListener('click', async () => {
+      if (!api || typeof api.deleteCacheItems !== 'function') return;
+      try {
+        const r = await api.deleteCacheItems([it.id]);
+        if (r && Array.isArray(r.deleted) && r.deleted.includes(String(it.id))) {
+          await refreshCacheItems();
+          renderCacheTab();
+          setStatus(`已删除缓存：${it.name || it.id}`, 'info');
+        } else {
+          setStatus('删除失败', 'warn');
+        }
+      } catch (e) { setStatus('删除异常：' + (e && e.message || e), 'error'); }
+    });
+    grid.appendChild(card);
+  });
+}
+function renderCacheToolbar() {
+  // 缓存过滤器、分段、清空按钮仅初始化一次绑定
+  if (document.body.dataset.cacheToolbarBound === '1') return;
+  document.body.dataset.cacheToolbarBound = '1';
+  const input = $('cache-filter');
+  if (input) {
+    input.addEventListener('input', (e) => { cacheState.filter = e.target.value; renderCacheTab(); });
+  }
+  document.querySelectorAll('[data-cache-type]').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('[data-cache-type]').forEach((x) => x.classList.toggle('active', x === b));
+      cacheState.type = b.dataset.cacheType;
+      renderCacheTab();
+    });
+  });
+  const doClear = async (scope) => {
+    if (!api || typeof api.clearCache !== 'function') return;
+    const labelMap = { models: '模型', motions: '动作', all: '全部' };
+    if (!confirm(`确定要清空${labelMap[scope] || ''}缓存吗？此操作不可撤销。`)) return;
+    try {
+      const r = await api.clearCache(scope);
+      await refreshCacheItems();
+      renderCacheTab();
+      setStatus(`已清空 ${r.removed || 0} 项，释放 ${fmtSize(Number(r.freedBytes) || 0)}`, 'success');
+    } catch (e) {
+      setStatus('清空缓存失败：' + (e && e.message || e), 'error');
+    }
+  };
+  const bm = $('btn-clear-model-cache');
+  const bv = $('btn-clear-motion-cache');
+  const ba = $('btn-clear-all-cache');
+  if (bm) bm.addEventListener('click', () => doClear('models'));
+  if (bv) bv.addEventListener('click', () => doClear('motions'));
+  if (ba) ba.addEventListener('click', () => doClear('all'));
+}
+// 顶栏自动缓存开关监听
+function bindToolbarAutoCacheToggle() {
+  const tgl = $('tgl-auto-cache');
+  if (!tgl || tgl.dataset.bound === '1') return;
+  tgl.dataset.bound = '1';
+  // 启动时不自动开启；点击后立即执行一次扫描（下次点击重新扫描，可多次触发）
+  tgl.addEventListener('change', async (e) => {
+    if (e.target.checked) {
+      // 切到缓存 Tab 便于观察
+      const want = document.querySelector('#info-panel .tab-btn[data-tab="cache"]');
+      if (want) want.click();
+      await startAutoCacheScan();
+    } else {
+      // 关闭：如果在扫描中则取消
+      if (cacheState.scanning && cacheState.scanTaskId && api && api.cancelResourceScan) {
+        await api.cancelResourceScan(cacheState.scanTaskId);
+      }
+    }
+  });
+}
+// 模型加载完成后，若是缓存项则写缩略图
+function hookLoadModelForThumb() {
+  if (window.__cacheThumbHooked) return;
+  window.__cacheThumbHooked = true;
+  // 以 MutationObserver 等方式侵入性太强；直接在 renderCacheTab load 时调用 maybeWriteCacheThumbForCurrent 即可
+  // 所以此处提供一个定时器，检测 currentModel 变化 2.5s 后写缩略图
+  let lastSeen = null;
+  setInterval(() => {
+    if (!currentModel) { lastSeen = null; return; }
+    const sig = String(currentModelPath || '') + '::' + String(currentModel && currentModel.id || '');
+    if (sig === lastSeen) return;
+    lastSeen = sig;
+    setTimeout(maybeWriteCacheThumbForCurrent, 2500);
+  }, 1000);
+}
+// 初始化一次（在 init() 末尾）
+function initCacheTabModule() {
+  bindCacheEventsOnce();
+  bindToolbarAutoCacheToggle();
+  hookLoadModelForThumb();
+}
+// 立即注册：不阻塞 init；init 尾部也会重复调用一次，内部防重
+initCacheTabModule();
 
 // 动作搜索
 motionFilterEl.addEventListener('input', (e) => { motionFilterKw = e.target.value; renderMotionList(); });
@@ -1726,6 +2213,7 @@ async function init() {
     }
     updateLibCounts();
     updateNavButtons();
+    initCacheTabModule();
   } catch (err) {
     setStatus('初始化失败：' + err.message, 'error');
   }
