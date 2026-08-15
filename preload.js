@@ -34,4 +34,6 @@ contextBridge.exposeInMainWorld('mmdAPI', {
   readTextFile: (filePath, maxBytes) => ipcRenderer.invoke('read-text-file', filePath, maxBytes),
   /** 本地路径 -> mmd:// URL */
   mmdUrl,
+  /** ammo.wasm 所在目录绝对路径（用于布料物理 mmd:// 加载） */
+  getAmmoLibsDir: () => ipcRenderer.invoke('get-ammo-libs-dir'),
 });

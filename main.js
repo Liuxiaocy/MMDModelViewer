@@ -85,6 +85,7 @@ const MIME_TYPES = {
   '.vpd': 'application/octet-stream',
   '.txt': 'text/plain; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.wasm': 'application/wasm',
 };
 
 function registerMmdProtocol() {
@@ -470,6 +471,11 @@ function registerIpc() {
     } catch (err) {
       return { ok: false, error: String(err && err.message || err) };
     }
+  });
+
+  // ---------- ammo.wasm 目录路径（布料物理用） ----------
+  ipcMain.handle('get-ammo-libs-dir', () => {
+    return path.join(__dirname, 'node_modules', 'three', 'examples', 'jsm', 'libs');
   });
 }
 

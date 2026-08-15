@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from '../node_modules/three/examples/jsm/controls/OrbitControls.js';
 import { MMDLoader } from '../node_modules/three/examples/jsm/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from '../node_modules/three/examples/jsm/animation/MMDAnimationHelper.js';
 
 const api = window.mmdAPI;
 const MOTION_EXTS_RE = /\.(vmd|vpd)$/i;
@@ -52,8 +53,10 @@ let currentDirPath = null;
 let currentModelPath = null;
 let currentModel = null;
 let currentMesh = null;
-let mixer = null;
-let currentAction = null;
+// AnimationMixer（旧管线）已废弃；统一由 MMDAnimationHelper 管理 IK + 物理 + 动画
+let mmdHelper = null;
+let ammoReady = false;
+let currentAnimating = false;  // 表示当前是否有动作在驱动（用于播放按钮显示）
 let vmdFiles = [];
 let motionRootItems = [];
 let motionFilterKw = '';
@@ -749,7 +752,7 @@ function buildPreviewCardHtml(node) {
     html += `<div class="section">动作预览</div>`;
     html += `<div class="kv"><div class="k">格式</div><div class="v">${/\.vmd$/i.test(node.name) ? 'VMD（动作）' : 'VPD（姿势）'}</div></div>`;
     html += `<div class="kv"><div class="k">状态</div><div class="v">${currentModel && currentMesh
-      ? (currentAction ? '已载入动作' : '点击后可应用到当前模型')
+      ? (currentAnimating ? '已载入动作' : '点击后可应用到当前模型')
       : '请先加载一个模型再应用此动作'}</div></div>`;
   } else if (isModelMesh) {
     html += `<div class="section">模型预览</div>`;
@@ -986,14 +989,17 @@ function updateLibCounts() {
 const mmdLoader = new MMDLoader();
 
 function clearModel() {
+  // 先让 helper 卸掉旧 mesh 的 IK/物理/动画轨道（必须在 scene.remove 之前）
+  if (mmdHelper && currentMesh) {
+    try { mmdHelper.remove(currentMesh); } catch (_) { /* ignore */ }
+  }
   if (currentModel) {
     scene.remove(currentModel);
     disposeObject(currentModel);
     currentModel = null;
     currentMesh = null;
   }
-  if (mixer) { mixer.stopAllAction(); mixer = null; }
-  currentAction = null;
+  currentAnimating = false;
   vmdFiles = [];
   vmdListEl.innerHTML = '';
   animPanel.classList.add('hidden');
@@ -1029,10 +1035,40 @@ async function loadModel(node) {
     currentModel = mesh;
     currentMesh = mesh;
     scene.add(mesh);
+
+    // ====== 交给 MMDAnimationHelper 统一驱动（IK + 物理 + 动画） ======
+    if (!mmdHelper) {
+      mmdHelper = new MMDAnimationHelper({
+        afterglow: 0.1,                 // 切动作 100ms 余辉
+        resetPhysicsOnLoop: true,
+      });
+    }
+
+    // 性能兜底：刚体数 > 200 自动关物理
+    const rbCount = (mesh.userData.rigidBodies && mesh.userData.rigidBodies.length) || 0;
+    const jnCount = (mesh.userData.joints && mesh.userData.joints.length) || 0;
+    let usePhysics = ammoReady;
+    if (usePhysics && rbCount > 200) {
+      usePhysics = false;
+      setStatus(`模型刚体 ${rbCount} 个过多，布料物理已自动关闭（腿部 IK 正常）`, 'warn');
+    }
+
+    mmdHelper.add(mesh, {
+      animation: undefined,            // 先不绑定动作，等 playVmd 调 _setupMeshAnimation
+      physics: usePhysics,
+      unitStep: 1 / 60,
+      maxStepNum: 2,
+      gravity: new THREE.Vector3(0, -9.8 * 10, 0),   // MMD 尺度毫米，×10 官方约定
+      resetPosition: true,
+      resetRotation: true,
+    });
+
     frameModel(mesh);
     showModelInfo(mesh, node);
     setupVmdList(mesh);
-    setStatus(`已加载：${node.name}`, 'info', `${vmdFiles.length} 个动作可用`);
+
+    const extra = `${vmdFiles.length} 个动作可用 · IK✓ · 布料${usePhysics ? `✓ (${rbCount} 刚体/${jnCount} 弹簧)` : '✗'}`;
+    setStatus(`已加载：${node.name}`, 'info', extra);
   } catch (err) {
     setStatus('加载模型失败：' + (err && err.message || err), 'error');
     console.error(err);
@@ -1120,14 +1156,22 @@ async function playVmd(vmdNode, mesh, el) {
     const clip = await new Promise((resolve, reject) => {
       mmdLoader.loadAnimation(url, mesh, resolve, undefined, reject);
     });
-    if (mixer) mixer.stopAllAction();
-    mixer = new THREE.AnimationMixer(mesh);
-    currentAction = mixer.clipAction(clip);
-    currentAction.play();
+
+    // MMDAnimationHelper 没有公开的 animate(mesh, clip) 方法；
+    // 切换动画的正确方式是调用内部 _setupMeshAnimation（会重建 mixer + ikSolver + grantSolver，
+    // 物理保持不变）。如果 mesh 还没 add 进 helper，兜底走 add。
+    if (mmdHelper && mesh && mmdHelper.objects && mmdHelper.objects.has(mesh)) {
+      mmdHelper._setupMeshAnimation(mesh, clip);
+    } else if (mmdHelper) {
+      // 兜底（先 add 再 setup）
+      mmdHelper.add(mesh, { animation: clip, physics: ammoReady });
+    }
+    currentAnimating = true;
+
     vmdListEl.querySelectorAll('.vmd-item').forEach((i) => i.classList.remove('active'));
     el && el.classList.add('active');
     showPreviewCardForNode({ path: vmdNode.path, name: vmdNode.name, size: vmdNode.size, type: 'model' }, true);
-    setStatus(`播放动作：${vmdNode.name}`, 'info', `时长 ${clip.duration.toFixed(2)}s · ${clip.tracks.length} 条轨道`);
+    setStatus(`播放动作：${vmdNode.name}`, 'info', `时长 ${clip.duration.toFixed(2)}s · ${clip.tracks.length} 条轨道 · IK+物理驱动`);
   } catch (err) {
     setStatus('加载动作失败：' + (err && err.message || err), 'error');
   }
@@ -1178,7 +1222,17 @@ const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
   const delta = clock.getDelta();
-  if (mixer && currentAction) mixer.update(delta * parseFloat(speedRange.value));
+  const speed = parseFloat(speedRange.value || '1');
+  // 无动作也要跑 helper.update(0)：物理（布料）继续惯性摆动 ~0.3s
+  const d = currentAnimating ? delta * speed : 0;
+  if (mmdHelper) {
+    try {
+      mmdHelper.update(d);
+    } catch (err) {
+      // 防止某一帧物理/IK 异常导致整帧卡崩
+      console.warn('[MMDAnimationHelper.update] caught:', err && err.message);
+    }
+  }
   controls.update();
   renderer.render(scene, camera);
 }
@@ -1223,12 +1277,34 @@ $('btn-choose-dir').addEventListener('click', async () => {
   if (res.ok) navigateTo(res.data, 'models', true);
 });
 
-// 播放控制
-$('btn-play').addEventListener('click', () => { if (currentAction) currentAction.play(); });
-$('btn-pause').addEventListener('click', () => { if (currentAction) currentAction.pause(); });
+// 播放控制（MMDAnimationHelper 统一驱动）
+$('btn-play').addEventListener('click', () => {
+  if (!mmdHelper || !currentMesh) return;
+  const obj = mmdHelper.objects && mmdHelper.objects.get(currentMesh);
+  if (obj && obj.mixer) obj.mixer.timeScale = 1;
+  currentAnimating = true;
+});
+$('btn-pause').addEventListener('click', () => {
+  if (!mmdHelper || !currentMesh) return;
+  const obj = mmdHelper.objects && mmdHelper.objects.get(currentMesh);
+  if (obj && obj.mixer) obj.mixer.timeScale = 0;
+  currentAnimating = false;
+});
 $('btn-stop').addEventListener('click', () => {
-  if (mixer) mixer.stopAllAction();
-  currentAction = null;
+  if (mmdHelper && currentMesh) {
+    // 从 helper 里 remove 后再 re-add（无 animation），相当于完全停止动作 + 回到 bind pose
+    try { mmdHelper.remove(currentMesh); } catch (_) {}
+    mmdHelper.add(currentMesh, {
+      animation: undefined,
+      physics: ammoReady && (currentMesh.userData.rigidBodies?.length || 0) <= 200,
+      unitStep: 1 / 60,
+      maxStepNum: 2,
+      gravity: new THREE.Vector3(0, -9.8 * 10, 0),
+      resetPosition: true,
+      resetRotation: true,
+    });
+  }
+  currentAnimating = false;
   vmdListEl.querySelectorAll('.vmd-item').forEach((i) => i.classList.remove('active'));
 });
 speedRange.addEventListener('input', () => { speedVal.textContent = parseFloat(speedRange.value).toFixed(1) + 'x'; });
@@ -1278,11 +1354,48 @@ document.addEventListener('keydown', (e) => {
 // 双击 canvas 重置视角
 canvas.addEventListener('dblclick', () => $('btn-reset-view').click());
 
+// ---------- Ammo.js 预加载（用于 MMDPhysics 布料） ----------
+// ammo.wasm.js 是 emscripten MODULARIZE=1 产出，<script> 加载后 window.Ammo 是工厂函数；
+// 必须调用工厂返回的 Promise<Module> 才能拿到真正的 Ammo 模块实例。
+// 不用 esbuild 打包是因为 ammo.wasm.js 内部 require("path")/("fs") 仅 Node 分支用，
+// esbuild 静态分析会报 Could not resolve "path"/"fs"。
+// TODO(prod): electron-builder asar 打包后此相对路径会失效，需改用 file:// 绝对路径或把 ammo.wasm.js 解包到 renderer/
+async function initAmmo() {
+  try {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '../node_modules/three/examples/jsm/libs/ammo.wasm.js';
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('ammo.wasm.js 脚本加载失败'));
+      document.head.appendChild(s);
+    });
+    const AmmoFactory = window.Ammo;
+    if (typeof AmmoFactory !== 'function') {
+      throw new Error('Ammo 工厂未挂载到 window（类型: ' + typeof AmmoFactory + '）');
+    }
+    // 调用工厂函数，返回 Promise<AmmoModule>，resolve 后 Ammo 才有 btVector3 等类
+    // 获取 ammo.wasm 所在目录，通过 mmd:// 协议加载 .wasm（避开 file:// fetch 限制）
+    const libsDir = await api.getAmmoLibsDir();
+    const Ammo = await AmmoFactory({
+      locateFile: (p) => api.mmdUrl(libsDir + '\\' + p),
+    });
+    window.Ammo = Ammo;  // 覆盖工厂为模块实例，供 MMDPhysics 内部使用
+    ammoReady = true;
+  } catch (err) {
+    ammoReady = false;
+    setStatus('ammo 加载失败，布料物理降级（腿部 IK 仍正常）：' + (err.message || err), 'warn');
+  }
+}
+
 // ---------- 启动 ----------
 async function init() {
   loadRecent();
+  // 先启动 ammo 预加载（与扫描根目录并行，保证第一个模型加载时 ammo 已就绪）
+  const ammoPromise = initAmmo();
   try {
     const [defRes, motRes] = await Promise.all([api.getDefaultRoot(), api.getMotionRoot()]);
+    // 等 ammo 完（不会比目录扫描更慢）
+    await ammoPromise;
     if (!defRes.ok || !defRes.data) { setStatus('默认根目录获取失败', 'error'); return; }
     defaultRootPath = defRes.data;
     motionRootPath = motRes.data || null;
