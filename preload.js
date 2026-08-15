@@ -36,4 +36,64 @@ contextBridge.exposeInMainWorld('mmdAPI', {
   mmdUrl,
   /** ammo.wasm 所在目录绝对路径（用于布料物理 mmd:// 加载） */
   getAmmoLibsDir: () => ipcRenderer.invoke('get-ammo-libs-dir'),
+
+  /** ========== 缓存资源识别 & 管理 ========== */
+
+  /** 返回缓存根目录 / 子目录绝对路径与当前总占用字节
+   * @returns {Promise<{root:string, models:string, motions:string, thumbs:string, tmp:string, totalSize:number}>}
+   */
+  getCacheDirInfo: () => ipcRenderer.invoke('get-cache-dir-info'),
+
+  /** 开始资源扫描（文件遍历 + 压缩包内部条目识别，不复制）
+   * @param {{roots:string[], intoArchives?:boolean}} p
+   * @returns {Promise<{taskId:string}>} taskId 用于取消与订阅进度
+   */
+  startResourceScan: (p) => ipcRenderer.invoke('start-resource-scan', p),
+
+  /** 取消指定扫描或缓存阶段任务
+   * @param {string} taskId
+   * @returns {Promise<{ok:boolean}>}
+   */
+  cancelResourceScan: (taskId) => ipcRenderer.invoke('cancel-resource-scan', taskId),
+
+  /** 执行勾选的候选资源 → 复制到 cache/models 或 cache/motions
+   * @param {{taskId:string, ids:string[]}} payload
+   * @returns {Promise<{ok:boolean, error?:string}>}
+   */
+  cacheSelectedResources: (payload) => ipcRenderer.invoke('cache-selected-resources', payload),
+
+  /** 返回 index.json 完整结构与计算总大小
+   * @returns {Promise<{index:{version:number, items:any[]}, totalSize:number}>}
+   */
+  getCacheIndex: () => ipcRenderer.invoke('get-cache-index'),
+
+  /** 删除指定项（同步删除磁盘文件 + thumb + index 条目）
+   * @param {string[]} ids
+   * @returns {Promise<{deleted:string[], failed:string[]}>}
+   */
+  deleteCacheItems: (ids) => ipcRenderer.invoke('delete-cache-items', ids),
+
+  /** 按范围清空缓存
+   * @param {'models'|'motions'|'all'} scope
+   * @returns {Promise<{removed:number, freedBytes:number}>}
+   */
+  clearCache: (scope) => ipcRenderer.invoke('clear-cache', scope),
+
+  /** 保存缩略图 PNG 并关联到 index 条目
+   * @param {{id:string, base64Png:string}} p
+   * @returns {Promise<{ok:boolean, thumbPath?:string, error?:string}>}
+   */
+  writeCacheThumb: (p) => ipcRenderer.invoke('write-cache-thumb', p),
+
+  /** 事件订阅 —— 扫描进度：{taskId, done:number, total:number, currentDir:string} */
+  onScanProgress: (cb) => ipcRenderer.on('scan-progress', (_e, payload) => cb(payload)),
+  /** 事件订阅 —— 扫描结束：
+   *  {taskId, candidates:[{id,name,ext,sourcePath,sourceType,archiveEntry?,sizeEstimate}],
+   *   totalCount:number, totalSize:number, cancelled?:boolean, error?:string}
+   */
+  onScanDone:     (cb) => ipcRenderer.on('scan-done',     (_e, payload) => cb(payload)),
+  /** 事件订阅 —— 缓存复制进度：{taskId, done:number, total:number, currentName:string, succeeded:boolean, error?:string} */
+  onCacheProgress:(cb) => ipcRenderer.on('cache-progress',(_e, payload) => cb(payload)),
+  /** 事件订阅 —— 缓存复制结束：{taskId, summary:{ok:number, fail:number, indexVersion:number}, error?:string} */
+  onCacheDone:    (cb) => ipcRenderer.on('cache-done',    (_e, payload) => cb(payload)),
 });
