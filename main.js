@@ -26,8 +26,26 @@ if (process.argv.includes('--smoke-test')) {
 }
 
 const DEFAULT_ROOT = 'D:\\素材\\3D模型';
-const MOTION_ROOT = path.join(DEFAULT_ROOT, '动作');
-const SCENE_ROOT = path.join(DEFAULT_ROOT, '场景');
+
+// ---------- 根目录设置（用户自定义，持久化 userData/settings.json） ----------
+// root 为空字符串时回退 DEFAULT_ROOT；动作库/场景库固定为其下「动作」「场景」子目录
+const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
+let rootSettings = { root: '' };
+function loadRootSettings() {
+  try {
+    const j = JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'));
+    if (j && typeof j.root === 'string' && j.root) rootSettings.root = j.root;
+  } catch (_) { /* 无设置文件时使用默认根 */ }
+}
+function saveRootSettings() {
+  try {
+    fs.writeFileSync(SETTINGS_FILE(), JSON.stringify({ root: rootSettings.root }, null, 2));
+  } catch (_) { /* ignore */ }
+}
+function effectiveRoot() { return rootSettings.root || DEFAULT_ROOT; }
+function motionRootOf(base) { return path.join(base, '动作'); }
+function sceneRootOf(base) { return path.join(base, '场景'); }
+loadRootSettings();
 
 // 支持的模型 / 压缩包 / 文本扩展名
 const MODEL_EXTS = new Set([
@@ -291,7 +309,7 @@ function extractArchive(archivePath) {
 function registerIpc() {
   ipcMain.handle('scan-dir', async (_evt, rootPath) => {
     try {
-      const target = rootPath || DEFAULT_ROOT;
+      const target = rootPath || effectiveRoot();
       if (!fs.existsSync(target)) {
         return { ok: false, error: `目录不存在：${target}` };
       }
@@ -314,7 +332,7 @@ function registerIpc() {
     const res = await dialog.showOpenDialog(mainWindow, {
       title: '选择模型目录',
       properties: ['openDirectory'],
-      defaultPath: DEFAULT_ROOT,
+      defaultPath: effectiveRoot(),
     });
     if (res.canceled || !res.filePaths.length) return { ok: false, error: 'cancelled' };
     return { ok: true, data: res.filePaths[0] };
@@ -330,7 +348,7 @@ function registerIpc() {
       title: (opts && opts.title) || '选择文件',
       properties: (opts && opts.properties) || ['openFile'],
       filters,
-      defaultPath: (opts && opts.defaultPath) || DEFAULT_ROOT,
+      defaultPath: (opts && opts.defaultPath) || effectiveRoot(),
     });
     if (res.canceled || !res.filePaths.length) return { ok: false, error: 'cancelled' };
     return { ok: true, data: res.filePaths };
@@ -352,25 +370,50 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('get-default-root', async () => ({ ok: true, data: DEFAULT_ROOT }));
+  ipcMain.handle('get-default-root', async () => ({ ok: true, data: effectiveRoot() }));
 
-  // 动作库根目录
+  // 动作库根目录（<根>/动作）
   ipcMain.handle('get-motion-root', async () => {
     try {
-      const ok = fs.existsSync(MOTION_ROOT) && fs.statSync(MOTION_ROOT).isDirectory();
-      return { ok: true, data: ok ? MOTION_ROOT : null };
+      const motionRoot = motionRootOf(effectiveRoot());
+      const ok = fs.existsSync(motionRoot) && fs.statSync(motionRoot).isDirectory();
+      return { ok: true, data: ok ? motionRoot : null };
     } catch (e) {
       return { ok: true, data: null };
     }
   });
 
-  // 场景模型根目录（<默认根>/场景）
+  // 场景模型根目录（<根>/场景）
   ipcMain.handle('get-scene-root', async () => {
     try {
-      const ok = fs.existsSync(SCENE_ROOT) && fs.statSync(SCENE_ROOT).isDirectory();
-      return { ok: true, data: ok ? SCENE_ROOT : null };
+      const sceneRoot = sceneRootOf(effectiveRoot());
+      const ok = fs.existsSync(sceneRoot) && fs.statSync(sceneRoot).isDirectory();
+      return { ok: true, data: ok ? sceneRoot : null };
     } catch (e) {
       return { ok: true, data: null };
+    }
+  });
+
+  // 根目录设置：{ root, customized }
+  ipcMain.handle('get-root-settings', async () => ({
+    ok: true,
+    data: { root: effectiveRoot(), customized: !!rootSettings.root },
+  }));
+
+  // 设置默认根目录（校验存在性并持久化到 userData/settings.json）
+  ipcMain.handle('set-default-root', async (_evt, rootPath) => {
+    try {
+      const target = String(rootPath || '').trim();
+      if (!target) return { ok: false, error: '根目录为空' };
+      if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) {
+        return { ok: false, error: `目录不存在：${target}` };
+      }
+      rootSettings.root = target;
+      saveRootSettings();
+      console.log('[settings] 默认根目录已设置为', target);
+      return { ok: true, data: { root: effectiveRoot() } };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message || err) };
     }
   });
 
@@ -1077,10 +1120,11 @@ function registerIpc() {
     if (existingIds.has(String(id))) {
       return { succeeded: false, skipped: true, reason: 'already_cached' };
     }
-    // 是否来自场景根目录（<默认根>/场景）：用于左侧「场景」卡片展示缓存场景模型
+    // 是否来自场景根目录（<根>/场景）：用于左侧「场景」卡片展示缓存场景模型
     const isSceneSource = (() => {
       try {
-        const prefix = SCENE_ROOT.endsWith(path.sep) ? SCENE_ROOT : SCENE_ROOT + path.sep;
+        const sceRoot = sceneRootOf(effectiveRoot());
+        const prefix = sceRoot.endsWith(path.sep) ? sceRoot : sceRoot + path.sep;
         const src = String(sourcePath || '').replace(/\\/g, '/').toLowerCase();
         const pref = prefix.replace(/\\/g, '/').toLowerCase();
         return src.startsWith(pref);
@@ -1342,13 +1386,19 @@ async function runSmokeTest() {
   };
 
   try {
-    // 1. 默认目录存在性
-    const rootExists = fs.existsSync(DEFAULT_ROOT);
-    check('default-root-exists', rootExists, DEFAULT_ROOT);
+    // 1. 根目录设置持久化读写
+    rootSettings.root = DEFAULT_ROOT;
+    saveRootSettings();
+    const rs = JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'));
+    check('root-settings-persist', rs && rs.root === DEFAULT_ROOT, SETTINGS_FILE());
+
+    // 2. 默认目录存在性
+    const rootExists = fs.existsSync(effectiveRoot());
+    check('default-root-exists', rootExists, effectiveRoot());
 
     if (rootExists) {
-      // 2. 扫描目录
-      const tree = scanDir(DEFAULT_ROOT);
+      // 3. 扫描目录
+      const tree = scanDir(effectiveRoot());
       const models = [];
       const archives = [];
       (function walk(n) {
@@ -1714,4 +1764,4 @@ app.on('window-all-closed', () => {
 });
 
 // 让渲染进程也能引用 mmd:// 构造辅助（在 preload 中实现）
-module.exports = { DEFAULT_ROOT, MODEL_EXTS };
+module.exports = { DEFAULT_ROOT, MODEL_EXTS, effectiveRoot, rootSettings, saveRootSettings };

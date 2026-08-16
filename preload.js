@@ -28,6 +28,10 @@ contextBridge.exposeInMainWorld('mmdAPI', {
   saveScreenshot: (dataUrl, defaultName) => ipcRenderer.invoke('save-screenshot', dataUrl, defaultName),
   /** 默认模型根目录 */
   getDefaultRoot: () => ipcRenderer.invoke('get-default-root'),
+  /** 根目录设置（用户自定义根，未设置时为默认根）：{ root, customized } */
+  getRootSettings: () => ipcRenderer.invoke('get-root-settings'),
+  /** 设置默认根目录（校验存在并持久化到 userData/settings.json） */
+  setDefaultRoot: (rootPath) => ipcRenderer.invoke('set-default-root', rootPath),
   /** 动作库根目录（<默认根>/动作） */
   getMotionRoot: () => ipcRenderer.invoke('get-motion-root'),
   /** 场景模型根目录（<默认根>/场景） */

@@ -782,7 +782,7 @@ function switchTab(tab, updateHistory = true) {
         updateNavButtons();
       }
     } else {
-      sceneTreeEl.innerHTML = '<div class="placeholder">未找到场景目录（D:\\素材\\3D模型\\场景）</div>';
+      sceneTreeEl.innerHTML = '<div class="placeholder">未找到场景目录（' + (defaultRootPath || '') + '\\场景）</div>';
     }
   } else if (tab === 'recent') {
     renderRecentList();
@@ -2399,6 +2399,46 @@ $('btn-refresh').addEventListener('click', async () => {
 $('btn-choose-dir').addEventListener('click', async () => {
   const res = await api.chooseDir();
   if (res.ok) navigateTo(res.data, 'models', true);
+});
+
+// 自定义默认根目录：选择目录 -> 持久化 -> 刷新各库与缓存扫描
+$('btn-set-root').addEventListener('click', async () => {
+  const res = await api.chooseDir();
+  if (!res.ok) return; // 用户取消
+  const setRes = await api.setDefaultRoot(res.data);
+  if (!setRes.ok) { setStatus('设置根目录失败：' + (setRes.error || '未知错误'), 'error'); return; }
+  defaultRootPath = res.data;
+  motionRootPath = null;
+  sceneRootPath = null;
+  rootPathEl.textContent = defaultRootPath;
+  navStack.back = [{ path: defaultRootPath, tab: 'models' }];
+  navStack.forward = [];
+  // 重新读取派生根（<根>/动作、<根>/场景）并刷新各库内容
+  const [motRes, sceRes] = await Promise.all([api.getMotionRoot(), api.getSceneRoot()]);
+  motionRootPath = motRes && motRes.data || null;
+  sceneRootPath = sceRes && sceRes.data || null;
+  await navigateTo(defaultRootPath, 'models', true);
+  if (motionRootPath) {
+    const r = await api.scanDir(motionRootPath);
+    if (r.ok) {
+      const flat = [];
+      (function walk(n) {
+        if (!n) return;
+        if (n.type === 'model' && MOTION_EXTS_RE.test(n.name)) flat.push(n);
+        (n.children || []).forEach(walk);
+      })(r.data);
+      motionRootItems = flat;
+      renderMotionList();
+    }
+  }
+  if (sceneRootPath) {
+    const r = await api.scanDir(sceneRootPath);
+    if (r.ok) { sceneRoot = r.data; renderTree(sceneRoot, sceneTreeEl); }
+  }
+  updateLibCounts();
+  updateNavButtons();
+  setStatus('根目录已设置为：' + defaultRootPath);
+  startAutoCacheScan();
 });
 
 // 播放控制（MMDAnimationHelper 统一驱动）
