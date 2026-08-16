@@ -63,7 +63,22 @@ let currentModelPath = null;
 let currentModel = null;
 let currentMesh = null;
 // 场景模型集合：与角色模型同时预览。加入场景的模型不会被 clearModel 移除
-let sceneItems = [];  // { mesh, node }
+// kind: 'scene' = 场景背景（仅一个，换场景时替换）；'placed' = 组合面板放置的可动模型
+let sceneItems = [];  // { mesh, node, kind }
+let composeTargetMesh = null;  // 组合面板最近放置的可动模型（附加动作的目标）
+let composeSelected = null;    // 组合面板当前选中的模型（移动/动作目标，选中边缘高亮）
+// 组合面板自定义下拉框实例（r2：展开显示选项名称 + 类型徽标）
+let composeSceneDD = null;
+let composeModelDD = null;
+let composeMotionDD = null;
+// 组合模型数量上限（r3：不含动作，默认 3，可在参数面板「组合」组修改）
+function composeMaxPlaced() {
+  const v = Number(getParam('compose', 'maxPlaced', 3));
+  return Math.max(1, Math.min(20, Math.floor(v) || 3));
+}
+function composePlacedCount() {
+  return (sceneItems || []).filter((s) => s && s.kind === 'placed').length;
+}
 // AnimationMixer（旧管线）已废弃；统一由 MMDAnimationHelper 管理 IK + 物理 + 动画
 let mmdHelper = null;
 let ammoReady = false;
@@ -115,6 +130,9 @@ const DEFAULT_PARAMS = {
     loopAnimation:    { t: 'switch', v: true,  label: '循环播放动作' },
     resetOnStop:      { t: 'switch', v: true,  label: '停止后回到BindPose' },
     afterglow:        { t: 'range',  v: 0.1,   label: '切动作余辉(秒)', min: 0, max: 1, step: 0.01 },
+  },
+  compose: {
+    maxPlaced:        { t: 'range',  v: 3,     label: '组合模型上限',  min: 1, max: 20, step: 1, hint: '组合面板可放置的模型数量（不含场景与动作）' },
   },
 };
 let PARAMS = {};
@@ -300,8 +318,13 @@ function refreshOutlineSelection() {
   const collect = (root) => {
     if (root && root.traverse) root.traverse((c) => { if (c && c.isMesh) sel.push(c); });
   };
-  collect(currentMesh);
-  (sceneItems || []).forEach((s) => collect(s && s.mesh));
+  // 组合面板选中目标：仅该模型边缘高亮；未选中时保持全模型描边
+  if (composeSelected) {
+    collect(composeSelected);
+  } else {
+    collect(currentMesh);
+    (sceneItems || []).forEach((s) => collect(s && s.mesh));
+  }
   window.__postfx.outlinePass.selectedObjects = sel;
 }
 function resetParamGroup(groupName) {
@@ -766,9 +789,19 @@ function switchTab(tab, updateHistory = true) {
     renderBreadcrumb('', []);
     breadcrumbEl.innerHTML = '<span class="crumb placeholder">最近加载的文件</span>';
     updateNavButtons();
+  } else if (tab === 'cache') {
+    renderSideCache();
+    renderBreadcrumb('', []);
+    breadcrumbEl.innerHTML = '<span class="crumb placeholder">💾 缓存资源：模型 / 场景 / 动作</span>';
+    updateNavButtons();
+  } else if (tab === 'compose') {
+    renderComposePanel();
+    renderBreadcrumb('', []);
+    breadcrumbEl.innerHTML = '<span class="crumb placeholder">🧩 组合编排：场景 + 模型 + 动作</span>';
+    updateNavButtons();
   } else {
     if (currentRoot) {
-      renderTree(currentRoot); // 重绘以显示「已缓存模型」组等最新状态
+      renderTree(currentRoot); // 重绘文件树（已缓存资源见「缓存资源」面板）
       renderBreadcrumb(currentDirPath || defaultRootPath,
         pathPartsUnderRoot(currentDirPath || defaultRootPath, defaultRootPath));
       if (updateHistory) pushNavHistory(currentDirPath || defaultRootPath, 'models');
@@ -800,51 +833,7 @@ function renderTree(root, containerEl) {
   if (root.children) {
     root.children.forEach((c) => dfsAppend(c, 1, [root], cont));
   }
-  // 已缓存模型组（功能：识别出的资源同步到左侧模型库）
-  if (!containerEl) {
-    const cached = (cacheState.items || []).filter((it) => it.type === 'model');
-    if (cached.length) {
-      const vdir = {
-        name: '🧊 已缓存模型',
-        path: '__cached_models__',
-        type: 'dir',
-        children: cached.map((it) => ({
-          name: it.name,
-          path: window.__cacheRootAbs
-            ? require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '')
-            : (it.name || ''),
-          type: 'model',
-          size: it.cacheSize,
-        })),
-      };
-      dfsAppend(vdir, 1, [root], cont);
-      const vrow = [...cont.querySelectorAll('.win10-row')].find((r) => r.dataset.path === '__cached_models__');
-      if (vrow) toggleDir(vrow, true);
-    }
-  }
-  // 已缓存场景组（功能：识别出的场景资源同步到左侧「场景」卡片）
-  if (containerEl === sceneTreeEl) {
-    const cachedScenes = (cacheState.items || []).filter((it) => isSceneCacheItem(it));
-    if (cachedScenes.length) {
-      const vdir = {
-        name: '🌆 已缓存场景',
-        path: '__cached_scenes__',
-        type: 'dir',
-        children: cachedScenes.map((it) => ({
-          name: it.name,
-          path: window.__cacheRootAbs
-            ? require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '')
-            : (it.name || ''),
-          type: 'model',
-          size: it.cacheSize,
-          isSceneCache: true,
-        })),
-      };
-      dfsAppend(vdir, 1, [root], cont);
-      const vrow = [...cont.querySelectorAll('.win10-row')].find((r) => r.dataset.path === '__cached_scenes__');
-      if (vrow) toggleDir(vrow, true);
-    }
-  }
+  // 注：已缓存资源不再注入文件树，统一展示在左侧「缓存资源」面板（模型/场景/动作分类）
 }
 function dfsAppend(node, depth, ancestorDirs, cont) {
   const row = appendWin10Row(node, depth, false, cont);
@@ -1412,16 +1401,325 @@ function renderRecentList() {
 }
 
 function updateLibCounts() {
-  const cachedModels = (cacheState.items || []).filter((it) => it.type === 'model').length;
-  const cachedMotions = (cacheState.items || []).filter((it) => it.type === 'motion').length;
-  $('lib-models-count').textContent = (currentRoot ? countModels(currentRoot) : 0) + cachedModels + ' 项';
-  $('lib-motions-count').textContent = (motionRootItems.length + cachedMotions) + ' 项';
+  // 文件树只统计文件系统中的资源；已缓存资源统一显示在「缓存资源」面板
+  $('lib-models-count').textContent = (currentRoot ? countModels(currentRoot) : 0) + ' 项';
+  $('lib-motions-count').textContent = motionRootItems.length + ' 项';
   $('lib-recent-count').textContent = recentItems.length + ' 项';
   const sce = $('lib-scenes-count');
-  if (sce) {
-    const cachedScenes = (cacheState.items || []).filter((it) => isSceneCacheItem(it)).length;
-    sce.textContent = ((sceneRoot ? countModels(sceneRoot) : 0) + cachedScenes) + ' 项';
+  if (sce) sce.textContent = (sceneRoot ? countModels(sceneRoot) : 0) + ' 项';
+  const cac = $('lib-cache-count');
+  if (cac) cac.textContent = (cacheState.items || []).length + ' 项';
+  const cmp = $('lib-compose-count');
+  if (cmp) cmp.textContent = sceneItems.length + ' 个';
+}
+
+// ---------- 组合编排面板（场景 + 可放置模型 + 动作） ----------
+function collectModelsInTree(rootNode) {
+  const out = [];
+  (function walk(n) {
+    if (!n) return;
+    if (n.type === 'model' && MODEL_MESH_RE.test(n.name)) out.push(n);
+    (n.children || []).forEach(walk);
+  })(rootNode);
+  return out;
+}
+function composeCacheAbs(it) {
+  return window.__cacheRootAbs ? require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '') : (it.sourcePath || '');
+}
+function fillSelect(sel, opts, emptyText) {
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!opts.length) {
+    const o = document.createElement('option');
+    o.textContent = emptyText;
+    sel.appendChild(o);
+    return;
   }
+  opts.forEach((o) => {
+    const opt = document.createElement('option');
+    opt.value = o.path;
+    opt.textContent = o.label;
+    sel.appendChild(opt);
+  });
+}
+// 组合面板：已加载模型列表（场景 + 放置模型 + 角色），点击选中高亮、可删除
+function composeModelListEntries() {
+  const entries = []; // { mesh, name, tag, motion, deletable }
+  const seen = new Set();
+  // 场景成员（含作为当前模型的场景）按其 kind 标记
+  (sceneItems || []).forEach((s) => {
+    if (!s || !s.mesh || seen.has(s.mesh)) return;
+    seen.add(s.mesh);
+    entries.push({
+      mesh: s.mesh,
+      name: (s.mesh.userData && s.mesh.userData.name) || (s.node && s.node.name) || s.mesh.name || (s.kind === 'scene' ? '场景' : '模型'),
+      tag: s.kind === 'scene' ? '场景' : '组合',
+      motion: (s.mesh.userData && s.mesh.userData.activeMotion) || ''
+    });
+  });
+  // 未加入场景的当前角色模型
+  if (currentModel && !seen.has(currentModel)) {
+    entries.push({
+      mesh: currentModel,
+      name: (currentModel.userData && currentModel.userData.name) || currentModel.name || '当前模型',
+      tag: '角色',
+      motion: (currentModel.userData && currentModel.userData.activeMotion) || ''
+    });
+  }
+  return entries;
+}
+function renderComposeModelList() {
+  const listEl = $('compose-model-list');
+  if (!listEl) return;
+  const entries = composeModelListEntries();
+  const countEl = $('compose-count');
+  if (countEl) {
+    countEl.textContent = entries.length
+      ? `${composePlacedCount()}/${composeMaxPlaced()} 个组合 · 共 ${entries.length} 个模型`
+      : '0 个模型';
+  }
+  const maxEl = $('compose-max-label');
+  if (maxEl) maxEl.textContent = String(composeMaxPlaced());
+  if (!entries.length) {
+    listEl.innerHTML = '<div class="cmi-empty">尚未加载任何模型。先加载场景，再放置模型即可组合。</div>';
+    return;
+  }
+  listEl.innerHTML = '';
+  entries.forEach((e) => {
+    const row = document.createElement('div');
+    row.className = 'cmi' + (composeSelected === e.mesh ? ' active' : '');
+    row.title = '点击选中（用于移动/附加动作）';
+    const name = document.createElement('span');
+    name.className = 'cmi-name';
+    name.textContent = e.name;
+    const tag = document.createElement('span');
+    tag.className = 'cmi-tag';
+    tag.textContent = e.tag;
+    row.appendChild(name);
+    row.appendChild(tag);
+    // 附加的动作（r4）：直观显示该模型当前使用的动作
+    if (e.motion) {
+      const mot = document.createElement('span');
+      mot.className = 'cmi-tag cmi-motion';
+      mot.textContent = '🎬 ' + e.motion;
+      mot.title = '该模型当前附加的动作';
+      row.appendChild(mot);
+    }
+    const del = document.createElement('button');
+    del.className = 'btn-tiny';
+    del.textContent = '删除';
+    del.title = '从场景中移除该模型';
+    del.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      removeSceneItem(e.mesh);
+    });
+    row.appendChild(del);
+    row.addEventListener('click', () => selectComposeModel(e.mesh));
+    listEl.appendChild(row);
+  });
+}
+// 选中组合面板中的模型：作为移动/附加动作的目标，并让该模型边缘高亮
+function selectComposeModel(mesh) {
+  if (!mesh) return;
+  composeSelected = mesh;
+  composeTargetMesh = mesh;
+  refreshOutlineSelection();
+  renderComposeModelList();
+  const nm = (mesh.userData && mesh.userData.name) || '';
+  setStatus('已选中模型' + (nm ? '：' + nm : '，可拖动位置或附加动作'), 'info');
+}
+function deselectComposeModel() {
+  composeSelected = null;
+  refreshOutlineSelection();
+  renderComposeModelList();
+}
+// ---------- 自定义下拉框（r2：展开显示选项名称 + 类型徽标） ----------
+function createComposeDropdown(id, placeholder) {
+  const root = $(id);
+  if (!root) return null;
+  root.innerHTML = `
+    <button type="button" class="c-dd-trigger" title="点击展开选择">
+      <span class="c-dd-label placeholder">${escapeHtml(placeholder)}</span>
+      <span class="c-dd-caret">▼</span>
+    </button>
+    <div class="c-dd-menu hidden"></div>`;
+  const trigger = root.querySelector('.c-dd-trigger');
+  const labelEl = root.querySelector('.c-dd-label');
+  const menu = root.querySelector('.c-dd-menu');
+  const api = {
+    _opts: [], _value: '', _placeholder: placeholder, _onChange: null,
+    setOptions(opts) {
+      this._opts = (opts || []).filter((o) => o && o.path);
+      const still = this._opts.find((o) => o.path === this._value);
+      this._value = still ? still.path : '';
+      this._renderLabel();
+      this._close();
+      this._renderMenu();
+    },
+    getValue() { return this._value; },
+    select(path) {
+      const o = this._opts.find((x) => x.path === path);
+      if (!o) return;
+      this._value = path;
+      this._renderLabel();
+      this._renderMenu();
+      this._close();
+      if (this._onChange) this._onChange(path);
+    },
+    onChange(fn) { this._onChange = fn; },
+    _renderLabel() {
+      const o = this._opts.find((x) => x.path === this._value);
+      labelEl.textContent = o ? o.label : this._placeholder;
+      labelEl.classList.toggle('placeholder', !o);
+    },
+    _renderMenu() {
+      menu.innerHTML = '';
+      if (!this._opts.length) {
+        menu.innerHTML = '<div class="c-dd-empty">暂无选项</div>';
+        return;
+      }
+      this._opts.forEach((o) => {
+        const item = document.createElement('div');
+        item.className = 'c-dd-item' + (o.path === this._value ? ' selected' : '');
+        item.title = o.path || '';
+        const name = document.createElement('span');
+        name.className = 'c-dd-item-name';
+        name.textContent = o.label || '';
+        item.appendChild(name);
+        if (o.meta) {
+          const meta = document.createElement('span');
+          meta.className = 'c-dd-item-meta';
+          meta.textContent = o.meta;
+          item.appendChild(meta);
+        }
+        item.addEventListener('click', () => api.select(o.path));
+        menu.appendChild(item);
+      });
+    },
+    _open() {
+      this._renderMenu();
+      menu.classList.remove('hidden');
+      root.classList.add('open');
+      // 空间不足时向上展开，避免被侧栏底部裁剪
+      const r = trigger.getBoundingClientRect();
+      const mh = menu.offsetHeight || 220;
+      const up = (window.innerHeight - r.bottom) < mh + 12;
+      menu.classList.toggle('up', up);
+    },
+    _close() {
+      menu.classList.add('hidden');
+      root.classList.remove('open');
+      menu.classList.remove('up');
+    }
+  };
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.classList.contains('hidden')) api._open(); else api._close();
+  });
+  document.addEventListener('click', (e) => { if (!root.contains(e.target)) api._close(); });
+  api._renderMenu();
+  return api;
+}
+// 初始化组合面板的三个下拉框（幂等，仅一次）
+let composeDDInited = false;
+function initComposeDropdowns() {
+  if (composeDDInited) return;
+  composeDDInited = true;
+  composeSceneDD = createComposeDropdown('compose-scene', '（暂无可选场景）');
+  composeModelDD = createComposeDropdown('compose-model', '（暂无可放置模型）');
+  composeMotionDD = createComposeDropdown('compose-motion', '（暂无可选动作）');
+}
+async function renderComposePanel() {
+  initComposeDropdowns();
+  if (!composeSceneDD || !composeModelDD || !composeMotionDD) return;
+  bindComposeEventsOnce();
+  if (!window.__cacheRootAbs && api && api.getCacheDirInfo) {
+    try {
+      const info = await api.getCacheDirInfo();
+      if (info && info.root) window.__cacheRootAbs = info.root;
+    } catch (_) { /* noop */ }
+  }
+  if (!cacheState.items.length) await refreshCacheItems();
+
+  // 已加载模型列表（点选 + 删除 + 显示附加动作）+ 数量上限
+  renderComposeModelList();
+
+  // 场景选项：场景根模型 + 已缓存场景项
+  const sceneOpts = [];
+  (sceneRoot ? collectModelsInTree(sceneRoot) : []).forEach((n) => {
+    if (!sceneOpts.some((o) => o.path === n.path)) sceneOpts.push({ label: n.name, path: n.path });
+  });
+  (cacheState.items || []).filter((it) => it.type === 'model' && isSceneCacheItem(it)).forEach((it) => {
+    const abs = composeCacheAbs(it);
+    if (sceneOpts.some((o) => o.path === abs)) return;
+    // 压缩包来源的场景可能重名（如不同 zip 内都是 Stage0514.pmx），附上来源包名以区分
+    let label = it.name;
+    if (it.sourceType === 'archive' && it.sourcePath) {
+      const zipName = String(it.sourcePath).replace(/\\/g, '/').split('/').pop();
+      if (zipName) label = it.name + '（' + zipName + '）';
+    }
+    sceneOpts.push({ label, path: abs });
+  });
+  composeSceneDD.setOptions(sceneOpts.map((o) => ({ ...o, meta: '场景' })));
+
+  // 可放置模型：缓存中的非场景模型（排除已放置/已加载的角色）
+  const inScenePaths = new Set();
+  if (currentModel && currentModel.userData && currentModel.userData.path) inScenePaths.add(currentModel.userData.path);
+  (sceneItems || []).forEach((s) => { if (s && s.node && s.node.path) inScenePaths.add(s.node.path); });
+  const modelOpts = [];
+  (cacheState.items || []).filter((it) => it.type === 'model' && !isSceneCacheItem(it)).forEach((it) => {
+    const abs = composeCacheAbs(it);
+    if (inScenePaths.has(abs)) return;
+    if (!modelOpts.some((o) => o.path === abs)) modelOpts.push({ label: it.name, path: abs });
+  });
+  composeModelDD.setOptions(modelOpts.map((o) => ({ ...o, meta: '模型' })));
+
+  // 动作选项：已缓存动作 + 动作库
+  const motionOpts = [];
+  (cacheState.items || []).filter((it) => it.type === 'motion').forEach((it) => {
+    const abs = composeCacheAbs(it);
+    if (!motionOpts.some((o) => o.path === abs)) motionOpts.push({ label: it.name, path: abs });
+  });
+  motionRootItems.forEach((n) => {
+    if (n.type === 'model' && MOTION_EXTS_RE.test(n.name) && !motionOpts.some((o) => o.path === n.path)) {
+      motionOpts.push({ label: n.name, path: n.path });
+    }
+  });
+  composeMotionDD.setOptions(motionOpts.map((o) => ({ ...o, meta: '动作' })));
+}
+let composeEventsBound = false;
+function bindComposeEventsOnce() {
+  if (composeEventsBound) return;
+  composeEventsBound = true;
+  $('btn-compose-scene').addEventListener('click', async () => {
+    const path = composeSceneDD && composeSceneDD.getValue();
+    const opt = (composeSceneDD && composeSceneDD._opts || []).find((o) => o.path === path);
+    if (!path) { setStatus('请先在组合面板选择场景', 'warn'); return; }
+    // 需求1：加载新场景时替换旧场景（kind='scene' 触发 removeSceneItems 替换）
+    loadModel({ path, name: (opt && opt.label) || path }, { asScene: true, kind: 'scene' });
+  });
+  $('btn-compose-model').addEventListener('click', async () => {
+    const path = composeModelDD && composeModelDD.getValue();
+    const opt = (composeModelDD && composeModelDD._opts || []).find((o) => o.path === path);
+    if (!path) { setStatus('请先选择要放置的模型', 'warn'); return; }
+    // r3：放置数量上限校验（不含动作）
+    const maxPlaced = composeMaxPlaced();
+    if (composePlacedCount() >= maxPlaced) {
+      setStatus(`组合模型数量已达上限 ${maxPlaced} 个（可在参数面板「组合」组调整）`, 'warn');
+      return;
+    }
+    // 放置模型：初始在网格中心 (0,0,0)，可动，选中作为动作目标
+    loadModel({ path, name: (opt && opt.label) || path }, { asScene: true, kind: 'placed', initialPosition: { x: 0, y: 0, z: 0 }, animatable: true });
+  });
+  $('btn-compose-motion').addEventListener('click', async () => {
+    const path = composeMotionDD && composeMotionDD.getValue();
+    const opt = (composeMotionDD && composeMotionDD._opts || []).find((o) => o.path === path);
+    if (!path) { setStatus('请先选择动作', 'warn'); return; }
+    // 动作目标：优先组合面板选中的模型
+    const target = composeSelected || composeTargetMesh || currentMesh;
+    if (!target) { setStatus('请先加载或放置一个模型，再应用动作', 'warn'); return; }
+    playVmd({ path, name: (opt && opt.label) || path }, target, null);
+  });
 }
 
 // ---------- MMD 模型加载 ----------
@@ -1477,6 +1775,8 @@ function clearSceneModels() {
   });
   const wasSceneCurrent = sceneItems.some((s) => s.mesh === currentModel);
   sceneItems = [];
+  composeTargetMesh = null;
+  composeSelected = null;
   if (wasSceneCurrent) {
     currentModel = null;
     currentMesh = null;
@@ -1489,6 +1789,48 @@ function clearSceneModels() {
   }
   refreshOutlineSelection();
   frameAll();
+}
+// 按条件移除场景中的模型（sceneItems 成员）：helper 卸载 + 移除 + 释放资源 + 引用清理
+function removeSceneItems(pred) {
+  const doomed = (sceneItems || []).filter(pred);
+  if (!doomed.length) return false;
+  doomed.forEach((s) => {
+    if (!s || !s.mesh) return;
+    if (mmdHelper && mmdHelper.objects && mmdHelper.objects.has(s.mesh)) {
+      try { mmdHelper.remove(s.mesh); } catch (_) { /* noop */ }
+    }
+    try { scene.remove(s.mesh); } catch (_) { /* noop */ }
+    disposeObject(s.mesh);
+    if (composeSelected === s.mesh) composeSelected = null;
+    if (composeTargetMesh === s.mesh) composeTargetMesh = null;
+    if (currentModel === s.mesh) {
+      currentModel = null;
+      currentMesh = null;
+      currentModelPath = null;
+      currentAnimating = false;
+      vmdFiles = [];
+      vmdListEl.innerHTML = '';
+      animPanel.classList.add('hidden');
+      modelInfoEl.innerHTML = '<div class="placeholder">点击「选择模型」或在左侧选文件开始预览</div>';
+    }
+  });
+  sceneItems = sceneItems.filter((s) => !pred(s));
+  refreshOutlineSelection();
+  updateLibCounts();
+  return true;
+}
+// 移除单个场景模型（组合面板删除）
+function removeSceneItem(mesh) {
+  if (!mesh) return;
+  const removed = removeSceneItems((s) => s.mesh === mesh);
+  if (!removed && currentModel === mesh) {
+    clearModel();
+    refreshOutlineSelection();
+    updateLibCounts();
+  }
+  if (activeTab === 'compose') renderComposePanel();
+  frameAll();
+  setStatus('已移除模型' + (mesh.name ? '：' + mesh.name : ''), 'info');
 }
 // 修复无表情模型（如场景模型 Stage0514，morphCount=0）的 shader 编译失败：
 // MMDLoader 对无 morph 的模型也会把 geometry.morphAttributes.position 设为空数组 []，
@@ -1526,13 +1868,17 @@ async function loadModel(node, opts = {}) {
       mmdLoader.load(url, resolve, undefined, reject);
     });
     fixEmptyMorphAttributes(mesh);
+    mesh.userData.path = node.path;   // 供组合面板识别「已放置模型」
     scene.add(mesh);
     // 刷新 OutlinePass 所选对象（稳定边缘 + 描边）
     refreshOutlineSelection();
 
     if (asScene) {
       // ====== 场景模型：加入场景，不动角色模型 ======
-      sceneItems.push({ mesh, node });
+      const kind = opts.kind || 'scene';   // 'scene' = 场景背景；'placed' = 放置的可动模型
+      // 需求1：场景模型仅能加载一个，加载新场景时先移除旧场景模型再加载
+      if (kind === 'scene') removeSceneItems((s) => s.kind === 'scene');
+      sceneItems.push({ mesh, node, kind });
       refreshOutlineSelection();
       if (opts.initialPosition) {
         mesh.position.set(opts.initialPosition.x, opts.initialPosition.y, opts.initialPosition.z);
@@ -1545,17 +1891,36 @@ async function loadModel(node, opts = {}) {
         showModelInfo(mesh, node);
         setupVmdList(mesh);
       }
-      // 场景等占用面积大的模型：默认视角定位在网格中心；小尺寸模型保持包围盒取景
-      const b = new THREE.Box3().setFromObject(mesh);
-      const sceneRadius = (() => {
-        const s = b.getSize(new THREE.Vector3());
-        return Math.max(s.x, s.y, s.z) / 2 || 0;
-      })();
-      if (sceneRadius > SCENE_LARGE_RADIUS) frameSceneAtGridCenter();
-      else frameAll();
+      // 组合面板放置的「可动模型」：加入 MMDAnimationHelper，使 IK/物理/动作对该模型生效，并设为当前选中目标
+      if (opts.animatable) {
+        if (!mmdHelper) {
+          mmdHelper = new MMDAnimationHelper({ afterglow: 0.1, resetPhysicsOnLoop: true });
+        }
+        if (!mmdHelper.objects.has(mesh)) {
+          mmdHelper.add(mesh, buildHelperOptions(mesh, { animation: undefined }));
+          syncIkSolverForMesh(mesh);
+        }
+        composeTargetMesh = mesh;
+        composeSelected = mesh;
+        refreshOutlineSelection();
+        if (mesh !== currentModel) setupVmdList(mesh);
+      }
+      // 场景模型加载时：默认视角定位在网格中心；小尺寸模型保持包围盒取景。
+      // 放置模型（kind='placed'）不改变相机 —— 保证放置新模型后视角不跳动。
+      if (kind === 'scene') {
+        const b = new THREE.Box3().setFromObject(mesh);
+        const sceneRadius = (() => {
+          const s = b.getSize(new THREE.Vector3());
+          return Math.max(s.x, s.y, s.z) / 2 || 0;
+        })();
+        if (sceneRadius > SCENE_LARGE_RADIUS) frameSceneAtGridCenter();
+        else frameAll();
+      }
       const total = sceneItems.some((s) => s.mesh === currentModel)
         ? sceneItems.length
         : sceneItems.length + (currentModel ? 1 : 0);
+      updateLibCounts();
+      if (activeTab === 'compose') renderComposePanel();
       setStatus(`已加入场景：${node.name}`, 'info', `场景中 ${total} 个模型 · 可开启「移动模式」拖动位置，或继续拖放模型进来`);
       return;
     }
@@ -1714,6 +2079,11 @@ async function playVmd(vmdNode, mesh, el) {
     const clip = await new Promise((resolve, reject) => {
       mmdLoader.loadAnimation(url, mesh, resolve, undefined, reject);
     });
+    // r4：记录该模型当前附加的动作，组合面板已加载列表直观显示
+    if (mesh) {
+      mesh.userData = mesh.userData || {};
+      mesh.userData.activeMotion = vmdNode.name || '';
+    }
 
     // MMDAnimationHelper 没有公开的 animate(mesh, clip) 方法；
     // 切换动画的正确方式是调用内部 _setupMeshAnimation（会重建 mixer + ikSolver + grantSolver，
@@ -1742,6 +2112,7 @@ async function playVmd(vmdNode, mesh, el) {
     el && el.classList.add('active');
     showPreviewCardForNode({ path: vmdNode.path, name: vmdNode.name, size: vmdNode.size, type: 'model' }, true);
     setStatus(`播放动作：${vmdNode.name}`, 'info', `时长 ${clip.duration.toFixed(2)}s · ${clip.tracks.length} 条轨道 · IK+物理驱动`);
+    if (activeTab === 'compose') renderComposeModelList();
   } catch (err) {
     setStatus('加载动作失败：' + (err && err.message || err), 'error');
   }
@@ -1751,14 +2122,8 @@ async function playVmd(vmdNode, mesh, el) {
 function renderMotionList() {
   const kw = motionFilterKw.trim().toLowerCase();
   const items = motionRootItems.filter((n) => !kw || (n.name || '').toLowerCase().includes(kw));
-  // 已缓存动作组（功能：识别出的资源同步到左侧动作库）
-  const cachedMotions = (cacheState.items || []).filter((it) =>
-    it.type === 'motion' &&
-    !motionRootItems.some((n) => (n.name || '') === (it.name || '')) &&
-    (!kw || String(it.name || '').toLowerCase().includes(kw))
-  );
-  if (!items.length && !cachedMotions.length) {
-    motionListEl.innerHTML = `<div class="placeholder">${motionFilterKw ? '没有匹配的动作文件' : '动作目录为空'}</div>`;
+  if (!items.length) {
+    motionListEl.innerHTML = `<div class="placeholder">${motionFilterKw ? '没有匹配的动作文件' : '动作目录为空（已缓存的动作请到「缓存资源」面板查看）'}</div>`;
     return;
   }
   motionListEl.innerHTML = '';
@@ -1791,35 +2156,6 @@ function renderMotionList() {
     el.addEventListener('mouseleave', hidePreviewCard);
     motionListEl.appendChild(el);
   });
-  cachedMotions.forEach((it) => {
-    const abs = window.__cacheRootAbs
-      ? require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '')
-      : '';
-    const el = document.createElement('div');
-    el.className = 'motion-item';
-    el.title = abs || String(it.name || '');
-    el.innerHTML = `
-      <div class="mi-icon">🎞️</div>
-      <div class="mi-body">
-        <div class="mi-name">${escapeHtml(String(it.name || ''))}</div>
-        <div class="mi-meta">
-          <span>${fmtSize(Number(it.cacheSize) || 0)}</span>
-          <span class="chip">已缓存</span>
-          ${currentModel && currentMesh ? '<span class="chip warn">可应用</span>' : ''}
-        </div>
-      </div>`;
-    el.addEventListener('click', () => {
-      document.querySelectorAll('.motion-item.selected').forEach((x) => x.classList.remove('selected'));
-      el.classList.add('selected');
-      if (currentModel && currentMesh) {
-        playVmd({ path: abs, name: it.name, size: it.cacheSize }, currentMesh, null);
-      } else {
-        showPreviewCardForNode({ path: abs, name: it.name, size: it.cacheSize, type: 'model' }, true);
-        setStatus('请先加载一个 PMX/PMD 模型，再应用此动作', 'warn', it.name);
-      }
-    });
-    motionListEl.appendChild(el);
-  });
 }
 
 // ---------- 渲染循环 ----------
@@ -1850,7 +2186,11 @@ animate();
 
 // ---------- 窗口尺寸 ----------
 function resize() {
-  const w = canvas.clientWidth, h = canvas.clientHeight;
+  // 以容器尺寸为基准：renderer.setSize 会把 canvas 写成固定 px 内联宽，
+  // 若以 canvas.clientWidth 为基准，拖拽侧栏/折叠/窗口缩放后读到的会是陈旧值，画布不更新
+  const vp = document.getElementById('viewport');
+  const w = vp ? vp.clientWidth : canvas.clientWidth;
+  const h = vp ? vp.clientHeight : canvas.clientHeight;
   if (w === 0 || h === 0) return;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -1902,15 +2242,48 @@ canvas.addEventListener('drop', async (e) => {
   const pos = pt ? { x: pt.x, y: pt.y, z: pt.z } : null;
   setStatus('拖放模型到场景：' + info.name + ' …', 'info');
   addRecent(info.path, info.name, 'model', info.size);
-  loadModel({ path: info.path, name: info.name, size: info.size }, { asScene: true, initialPosition: pos });
+  loadModel({ path: info.path, name: info.name, size: info.size }, { asScene: true, initialPosition: pos, kind: 'placed', animatable: true });
 });
 
 // 移动模式：开启后在视口内按住左键拖动模型到任意位置
+// - 仅能移动「选中模型」：组合面板选中的模型优先，未选中时回退到当前角色模型（非组合单个模型也可移动）
+// - 仅支持鼠标拖拽，沿地面平面自由移动（X/Z），Y 保持不动
 let moveModeActive = false;
-let dragState = null; // { mesh, grabOffset: THREE.Vector3, startY }
+let dragState = null; // { mesh, grabOffset, startY, _savedPhysics }
+function moveModeTarget() {
+  if (composeSelected) return composeSelected;
+  if (currentMesh) return currentMesh;
+  return null;
+}
 function endDrag() {
   dragState = null;
   canvas.style.cursor = moveModeActive ? 'grab' : '';
+}
+// 拖拽结束后恢复该模型物理：先把所有刚体变换重置到当前骨骼位置并清空速度，
+// 再恢复每帧更新，避免 dynamic 刚体（布料/裙摆）停留在旧位置被约束拉扯产生剧烈抖动
+function restoreDragPhysics() {
+  if (!dragState || !dragState._savedPhysics) return;
+  const h = mmdHelper && mmdHelper.objects && mmdHelper.objects.get(dragState.mesh);
+  if (!h) return;
+  try {
+    h.physics = dragState._savedPhysics;
+    const p = h.physics;
+    // pointerup 事件发生在渲染循环之外，骨骼 matrixWorld 仍是上一帧的旧位置。
+    // 必须先刷新，否则 reset() 会把刚体复位到错误位置，持续错位导致抖动。
+    if (dragState.mesh && dragState.mesh.updateMatrixWorld) dragState.mesh.updateMatrixWorld(true);
+    p.reset();
+    if (p.bodies && p.manager && p.manager.allocVector3) {
+      const zero = p.manager.allocVector3();
+      zero.setValue(0, 0, 0);
+      for (const rb of p.bodies) {
+        if (!rb.body) continue;
+        rb.body.activate(true);
+        rb.body.setLinearVelocity(zero);
+        rb.body.setAngularVelocity(zero);
+      }
+      p.manager.freeVector3(zero);
+    }
+  } catch (_) { /* 无物理的模型忽略 */ }
 }
 function setMoveMode(on) {
   moveModeActive = on;
@@ -1919,7 +2292,7 @@ function setMoveMode(on) {
   controls.enabled = !on;
   if (viewHintEl) {
     viewHintEl.textContent = on
-      ? '移动模式：按住左键拖动模型到任意位置 · 再次点击「移动模式」关闭'
+      ? '移动模式：按住左键拖动选中模型 · 再次点击关闭'
       : '左键旋转 · 右键平移 · 滚轮缩放 · 双击模型重置视角 · 可将左侧模型拖入场景';
   }
   canvas.style.cursor = on ? 'grab' : '';
@@ -1934,56 +2307,76 @@ $('btn-clear-scene').addEventListener('click', () => {
 canvas.addEventListener('pointerdown', (e) => {
   if (!moveModeActive) return;
   if (e.button !== 0) return;
+  // Bug 修复：仅允许拖动「选中模型」，防止误触其他模型导致其位置被改动
+  const target = moveModeTarget();
+  if (!target) return;
   const ndc = pointerNDC(e);
   _raycaster.setFromCamera(ndc, camera);
-  const targets = [];
-  if (currentModel) targets.push(currentModel);
-  (sceneItems || []).forEach((s) => { if (s && s.mesh) targets.push(s.mesh); });
-  const hits = _raycaster.intersectObjects(targets, true);
+  const hits = _raycaster.intersectObjects([target], true);
   if (!hits.length) return;
-  // 找到命中对象所属的顶层模型（角色或某个场景模型）
-  let owner = null;
-  for (const m of targets) {
-    let c = hits[0].object;
-    while (c) { if (c === m) { owner = m; break; } c = c.parent; }
-    if (owner) break;
-  }
-  if (!owner) owner = hits[0].object;
   const ground = groundPointFromEvent(e);
   if (!ground) return;
   dragState = {
-    mesh: owner,
-    grabOffset: new THREE.Vector3().copy(owner.position).sub(ground),
-    startY: owner.position.y,
+    mesh: target,
+    grabOffset: new THREE.Vector3().copy(target.position).sub(ground),
+    startY: target.position.y,
   };
+  // 拖动期间暂停该模型物理：dynamic 刚体（布料/裙摆）由物理引擎控制，
+  // 整体移动模型时它们会停留在旧位置，被约束拉扯产生剧烈抖动
+  const physH = mmdHelper && mmdHelper.objects && mmdHelper.objects.get(target);
+  if (physH && physH.physics) {
+    dragState._savedPhysics = physH.physics;
+    physH.physics = null;
+  }
   canvas.style.cursor = 'grabbing';
   try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* noop */ }
   e.preventDefault();
-  setStatus('拖动模型位置…', 'info', owner.name || '');
+  setStatus('拖动模型位置…', 'info', target.name || '');
 });
 canvas.addEventListener('pointermove', (e) => {
   if (!dragState || !dragState.mesh) return;
   const ground = groundPointFromEvent(e);
   if (!ground) return;
-  const m = dragState.mesh;
-  m.position.x = ground.x + dragState.grabOffset.x;
-  m.position.z = ground.z + dragState.grabOffset.z;
-  m.position.y = dragState.startY;
+  const st = dragState;
+  const m = st.mesh;
+  // 仅支持鼠标拖拽移动：地面平面自由移动（X/Z），Y 保持不动
+  m.position.x = ground.x + st.grabOffset.x;
+  m.position.z = ground.z + st.grabOffset.z;
+  m.position.y = st.startY;
 });
 canvas.addEventListener('pointerup', () => {
   if (!dragState) return;
   const name = dragState.mesh && dragState.mesh.name || '';
+  restoreDragPhysics();
   endDrag();
   setStatus('已移动模型位置', 'info', name);
 });
-canvas.addEventListener('pointercancel', () => { if (dragState) endDrag(); });
+canvas.addEventListener('pointercancel', () => {
+  if (!dragState) return;
+  restoreDragPhysics();
+  endDrag();
+});
 
 // ---------- 工具栏事件 ----------
 $('btn-open-model').addEventListener('click', handleOpenModelDialog);
 $('btn-open-archive').addEventListener('click', handleOpenArchiveDialog);
 $('btn-reset-view').addEventListener('click', () => {
-  frameAll();
-  if (!currentModel && !sceneItems.length) {
+  // 计算场景中最大包围盒半径：存在大面积场景模型时，默认视角对准网格中心（贴地内部视角）；
+  // 否则按「角色+全部场景模型」整体取景。
+  let maxRadius = 0;
+  const targets = [];
+  if (currentModel) targets.push(currentModel);
+  (sceneItems || []).forEach((s) => { if (s && s.mesh) targets.push(s.mesh); });
+  targets.forEach((t) => {
+    try {
+      const b = new THREE.Box3().setFromObject(t);
+      const s = b.getSize(new THREE.Vector3());
+      maxRadius = Math.max(maxRadius, Math.max(s.x, s.y, s.z) / 2 || 0);
+    } catch (_) { /* noop */ }
+  });
+  if (maxRadius > SCENE_LARGE_RADIUS) frameSceneAtGridCenter();
+  else frameAll();
+  if (!targets.length) {
     camera.position.set(0, 2.2, 5.2); controls.target.set(0, 1.1, 0); controls.update();
   }
 });
@@ -2032,10 +2425,14 @@ $('btn-stop').addEventListener('click', () => {
       resetRotation: doReset,
     }));
     syncIkSolverForMesh(currentMesh);
+    // r4：停止后清除该模型的动作记录
+    currentMesh.userData = currentMesh.userData || {};
+    currentMesh.userData.activeMotion = '';
   }
   currentAnimating = false;
   refreshOutlineSelection();
   vmdListEl.querySelectorAll('.vmd-item').forEach((i) => i.classList.remove('active'));
+  if (activeTab === 'compose') renderComposeModelList();
 });
 speedRange.addEventListener('input', () => { speedVal.textContent = parseFloat(speedRange.value).toFixed(1) + 'x'; });
 
@@ -2070,9 +2467,10 @@ document.querySelectorAll('#info-panel .tab-btn').forEach((btn) => {
 });
 // ---------- 参数面板 UI 渲染 ----------
 let currentParamGroup = 'render';
+const PARAM_GROUP_LIST = ['render', 'physics', 'ik', 'anim', 'compose'];
 function renderParamPanel(group) {
-  if (group && ['render', 'physics', 'ik', 'anim'].includes(group)) currentParamGroup = group;
-  ['render', 'physics', 'ik', 'anim'].forEach((g) => {
+  if (group && PARAM_GROUP_LIST.includes(group)) currentParamGroup = group;
+  PARAM_GROUP_LIST.forEach((g) => {
     const root = document.querySelector(`#params-${g} .group-rows`);
     if (!root) return;
     if (root.dataset.built === '1') {
@@ -2185,7 +2583,7 @@ function syncParamValuesFromState(group) {
   });
   if (btnAll) btnAll.addEventListener('click', () => {
     resetAllParams();
-    ['render', 'physics', 'ik', 'anim'].forEach((g) => syncParamValuesFromState(g));
+    PARAM_GROUP_LIST.forEach((g) => syncParamValuesFromState(g));
     setStatus('已重置所有参数到默认值', 'info');
   });
 })();
@@ -2712,6 +3110,94 @@ function renderCacheToolbar() {
   if (bv) bv.addEventListener('click', () => doClear('motions'));
   if (ba) ba.addEventListener('click', () => doClear('all'));
 }
+// 左侧「缓存资源」面板：按类型分类展示（模型 / 场景 / 动作），与文件资源管理器区分开
+async function renderSideCache() {
+  if (!window.__cacheRootAbs && api && api.getCacheDirInfo) {
+    try {
+      const info = await api.getCacheDirInfo();
+      if (info && info.root) window.__cacheRootAbs = info.root;
+    } catch (_) { /* noop */ }
+  }
+  if (!cacheState.items.length) await refreshCacheItems();
+  const all = (cacheState.items || []).slice();
+  const catModels = all.filter((it) => it.type === 'model' && !isSceneCacheItem(it));
+  const catScenes = all.filter((it) => it.type === 'model' && isSceneCacheItem(it));
+  const catMotions = all.filter((it) => it.type === 'motion');
+  const countOf = (id, n) => { const el = $(id); if (el) el.textContent = n + ' 项'; };
+  countOf('cc-models-count', catModels.length);
+  countOf('cc-scenes-count', catScenes.length);
+  countOf('cc-motions-count', catMotions.length);
+  const sizeBadge = $('side-cache-size');
+  if (sizeBadge) {
+    const total = all.reduce((s, it) => s + (Number(it.cacheSize) || 0), 0);
+    sizeBadge.textContent = all.length ? `${all.length} 项 · ${fmtSize(total)}` : '0 项';
+  }
+  const groups = [
+    { key: 'models', items: catModels, empty: '暂无缓存模型' },
+    { key: 'scenes', items: catScenes, empty: '暂无缓存场景' },
+    { key: 'motions', items: catMotions, empty: '暂无缓存动作' },
+  ];
+  groups.forEach((g) => {
+    const box = $(`cc-${g.key}`);
+    if (!box) return;
+    if (!g.items.length) {
+      box.innerHTML = `<div class="scc-empty">${g.empty}</div>`;
+      return;
+    }
+    box.innerHTML = '';
+    g.items.forEach((it) => {
+      const abs = window.__cacheRootAbs ? require_path_join_fallback(window.__cacheRootAbs, it.cachePath || '') : '';
+      const row = document.createElement('div');
+      row.className = 'scc-row';
+      row.title = abs || String(it.name || '');
+      row.innerHTML = `
+        <span class="scc-icon">${it.type === 'model' ? '🧊' : '🎬'}</span>
+        <span class="scc-name">${escapeHtml(String(it.name || ''))}</span>
+        <span class="scc-ext">${String(it.ext || '').toUpperCase()}</span>
+        <span class="scc-del" title="删除该缓存">×</span>`;
+      const doLoad = () => {
+        if (!window.__cacheRootAbs) { setStatus('缓存根目录未知，请稍后再试', 'warn'); return; }
+        if (it.type === 'model') {
+          selectFile({ path: abs, name: it.name, type: 'model', size: it.cacheSize, isSceneCache: isSceneCacheItem(it) });
+        } else if (it.type === 'motion' && currentMesh) {
+          playVmd({ path: abs, name: it.name, size: it.cacheSize }, currentMesh, null);
+        } else if (it.type === 'motion') {
+          setStatus('请先加载一个 PMX/PMD 模型，再应用此动作', 'warn');
+        }
+      };
+      // 模型行支持拖到 3D 视口（放入场景指定位置；场景缓存项带 scene 标记）
+      if (it.type === 'model') {
+        row.draggable = true;
+        row.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('application/x-mmd-model', JSON.stringify({
+            path: abs,
+            name: it.name,
+            size: Number(it.cacheSize) || null,
+            isSceneCache: isSceneCacheItem(it),
+          }));
+          e.dataTransfer.effectAllowed = 'copy';
+        });
+      }
+      row.addEventListener('click', doLoad);
+      row.querySelector('.scc-del').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!api || typeof api.deleteCacheItems !== 'function') return;
+        try {
+          const r = await api.deleteCacheItems([it.id]);
+          if (r && Array.isArray(r.deleted) && r.deleted.includes(String(it.id))) {
+            await refreshCacheItems();
+            renderSideCache();
+            updateLibCounts();
+            setStatus(`已删除缓存：${it.name || it.id}`, 'info');
+          } else {
+            setStatus('删除失败', 'warn');
+          }
+        } catch (err) { setStatus('删除异常：' + (err && err.message || err), 'error'); }
+      });
+      box.appendChild(row);
+    });
+  });
+}
 // 顶栏自动缓存开关监听
 const AUTOCACHE_KEY = 'mmdviewer_autocache_v1';
 function bindToolbarAutoCacheToggle() {
@@ -2889,6 +3375,78 @@ function countModels(node) {
   return n;
 }
 
+// ---------- 左右侧边栏：收起/展开 + 拖拽调宽 ----------
+const SIDEBAR_W_KEY = 'mmd.sidebarW';
+const INFOPANEL_W_KEY = 'mmd.infoW';
+function applySidebarLayout() {
+  const sb = $('sidebar'), ip = $('info-panel');
+  if (!sb || !ip) return;
+  let sw = parseInt(localStorage.getItem(SIDEBAR_W_KEY), 10);
+  let iw = parseInt(localStorage.getItem(INFOPANEL_W_KEY), 10);
+  if (isNaN(sw)) sw = 300; if (isNaN(iw)) iw = 280;
+  sw = Math.min(480, Math.max(200, sw));
+  iw = Math.min(440, Math.max(200, iw));
+  document.documentElement.style.setProperty('--sidebar-w', sw + 'px');
+  document.documentElement.style.setProperty('--info-w', iw + 'px');
+  // 折叠状态恢复
+  if (localStorage.getItem('mmd.sidebarCollapsed') === '1') sb.classList.add('collapsed');
+  if (localStorage.getItem('mmd.infoCollapsed') === '1') ip.classList.add('collapsed');
+}
+function initLayoutControls() {
+  applySidebarLayout();
+  const toggleCollapse = (el, key, btn) => {
+    const cb = (on) => {
+      el.classList.toggle('collapsed', on);
+      localStorage.setItem(key, on ? '1' : '0');
+      if (btn) {
+        btn.classList.toggle('active', on);
+        btn.textContent = btn.dataset && (on ? btn.dataset.collapsed : btn.dataset.open) || btn.textContent;
+      }
+      setTimeout(() => { resize(); frameAll(); }, 60);
+    };
+    btn.addEventListener('click', () => cb(!el.classList.contains('collapsed')));
+    // 启动时若已处于折叠态，同步按钮图标
+    if (el.classList.contains('collapsed') && btn) {
+      btn.textContent = btn.dataset && btn.dataset.collapsed || btn.textContent;
+      btn.classList.add('active');
+    }
+  };
+  toggleCollapse($('sidebar'), 'mmd.sidebarCollapsed', $('btn-toggle-sidebar'));
+  toggleCollapse($('info-panel'), 'mmd.infoCollapsed', $('btn-toggle-info'));
+  // 拖拽条改宽度：splitter-left → --sidebar-w，splitter-right → --info-w
+  const bindSplitter = (id, varName, minW, maxW, storeKey) => {
+    const bar = $(id);
+    if (!bar) return;
+    bar.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { bar.setPointerCapture(e.pointerId); } catch (_) { /* noop */ }
+      bar.classList.add('dragging');
+      const startX = e.clientX;
+      const root = document.documentElement;
+      const startW = parseFloat(getComputedStyle(root).getPropertyValue(varName)) || 300;
+      const onMove = (ev) => {
+        let w = startW + (ev.clientX - startX) * (id === 'splitter-left' ? 1 : -1);
+        w = Math.min(maxW, Math.max(minW, w));
+        root.style.setProperty(varName, w + 'px');
+        localStorage.setItem(storeKey, String(Math.round(w)));
+        // 同步画布尺寸与投影矩阵（camera 位置不变，避免视角被拖动侧栏改动）
+        resize();
+      };
+      const onUp = () => {
+        bar.classList.remove('dragging');
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        resize();
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+  };
+  bindSplitter('splitter-left', '--sidebar-w', 200, 480, SIDEBAR_W_KEY);
+  bindSplitter('splitter-right', '--info-w', 200, 440, INFOPANEL_W_KEY);
+}
+initLayoutControls();
+
 init();
 
 // ---------- 冒烟测试钩子 ----------
@@ -2967,6 +3525,37 @@ window.__mmdTest = {
     return out;
   },
   // 当前 3D 视口状态（诊断用）：网格数、贴图加载情况、相机位置、渲染帧计数、渲染像素亮度
+  swapScene: async (filePath, name) => {
+    await loadModel({ path: filePath, name: name || '场景' }, { asScene: true, kind: 'scene' });
+    return true;
+  },
+  placeModel: async (filePath, name) => {
+    await loadModel({ path: filePath, name: name || '模型' }, { asScene: true, kind: 'placed', initialPosition: { x: 0, y: 0, z: 0 }, animatable: true });
+    return true;
+  },
+  applyMotion: async (path, name) => {
+    const target = composeSelected || composeTargetMesh || currentMesh;
+    if (!target) return { ok: false, error: 'no target' };
+    playVmd({ path, name: name || '动作' }, target, null);
+    await new Promise((r) => setTimeout(r, 400));
+    return { ok: true, motion: target.userData && target.userData.activeMotion };
+  },
+  composeInfo: () => ({
+    placed: composePlacedCount(),
+    maxPlaced: composeMaxPlaced(),
+    sceneOpts: (composeSceneDD && composeSceneDD._opts || []).map((o) => o.label).slice(0, 5),
+    modelOpts: (composeModelDD && composeModelDD._opts || []).map((o) => o.label).slice(0, 5),
+    motionOpts: (composeMotionDD && composeMotionDD._opts || []).map((o) => o.label).slice(0, 3),
+    scenePaths: (composeSceneDD && composeSceneDD._opts || []).map((o) => o.path).slice(0, 5),
+    modelPaths: (composeModelDD && composeModelDD._opts || []).map((o) => o.path).slice(0, 5),
+    motionPaths: (composeMotionDD && composeMotionDD._opts || []).map((o) => o.path).slice(0, 3),
+    rows: Array.from(document.querySelectorAll('.cmi')).map((r) => ({
+      name: r.querySelector('.cmi-name') && r.querySelector('.cmi-name').textContent,
+      tags: Array.from(r.querySelectorAll('.cmi-tag')).map((t) => t.textContent),
+    })),
+    camPos: camera.position.toArray().map((n) => n.toFixed(2)),
+    camTarget: controls.target.toArray().map((n) => n.toFixed(2)),
+  }),
   getState: () => {
     const meshes = [];
     let texLoaded = 0;
@@ -3010,11 +3599,107 @@ window.__mmdTest = {
       meshCount: meshes.length,
       meshNames: meshes.slice(0, 5),
       sceneItems: sceneItems.length,
+      scenePositions: (sceneItems || []).map((s) => ({
+        name: (s && s.node && s.node.name) || (s.mesh && s.mesh.name) || '?',
+        pos: s.mesh ? s.mesh.position.toArray().map((n) => n.toFixed(2)) : null,
+      })),
       texLoaded,
       texTotal,
       camPos: camera.position.toArray().map((n) => n.toFixed(1)),
       frames: window.__renderFrames || 0,
       pixel,
     };
+  },
+  // 测试辅助：计算 mesh 屏幕上可命中的像素点（XZ 网格 × 高度方向逐档尝试）
+  screenPointFor: (mesh, tryFrac) => {
+    if (!mesh) return { hit: false, error: 'no mesh' };
+    const b = new THREE.Box3().setFromObject(mesh);
+    const rect = canvas.getBoundingClientRect();
+    const fracs = tryFrac !== undefined ? [tryFrac] : [0.5, 0.6, 0.4, 0.7, 0.3, 0.8, 0.25, 0.2, 0.9];
+    const xz = [0.5, 0.25, 0.75, 0.1, 0.9];
+    for (const fx of xz) {
+      const px = b.min.x + (b.max.x - b.min.x) * fx;
+      for (const fz of xz) {
+        const pz = b.min.z + (b.max.z - b.min.z) * fz;
+        for (const f of fracs) {
+          const p = new THREE.Vector3(px, b.min.y + (b.max.y - b.min.y) * f, pz);
+          p.project(camera);
+          if (p.z > 1 || p.z < -1) continue;
+          const ndc = new THREE.Vector2(p.x, p.y);
+          // 跳过投影到视口外的点，避免合成事件落在视口外
+          if (ndc.x < -1 || ndc.x > 1 || ndc.y < -1 || ndc.y > 1) continue;
+          _raycaster.setFromCamera(ndc, camera);
+          const hits = _raycaster.intersectObjects([mesh], true);
+          if (hits.length) {
+            return {
+              hit: true,
+              clientX: rect.left + ((ndc.x + 1) / 2) * rect.width,
+              clientY: rect.top + (1 - (ndc.y + 1) / 2) * rect.height,
+            };
+          }
+        }
+      }
+    }
+    return { hit: false, fracs, diag: { camPos: camera.position.toArray().map((n) => +n.toFixed(2)), target: controls.target.toArray().map((n) => +n.toFixed(2)) } };
+  },
+  // 测试辅助：将相机对准 mesh 中心，确保模型位于视口内可命中
+  focusMesh: (mesh) => {
+    if (!mesh) return { ok: false, error: 'no mesh' };
+    const b = new THREE.Box3().setFromObject(mesh);
+    const c = b.getCenter(new THREE.Vector3());
+    const r = b.getSize(new THREE.Vector3()).length() || 1;
+    controls.target.copy(c);
+    camera.position.copy(c).add(new THREE.Vector3(r * 1.2, r * 0.9, r * 1.2));
+    camera.lookAt(c);
+    controls.update();
+    return { ok: true, radius: +r.toFixed(2), camPos: camera.position.toArray().map((n) => +n.toFixed(2)), target: controls.target.toArray().map((n) => +n.toFixed(2)) };
+  },
+  // 测试辅助：查询 mesh 物理状态（暂停与否 + 刚体与骨骼的最大位置偏差，用于验证拖动期间暂停与结束后复位）
+  physicsState: (mesh) => {
+    const h = mmdHelper && mmdHelper.objects && mmdHelper.objects.get(mesh);
+    if (!h) return { hasPhysics: false, note: 'no-helper' };
+    if (!h.physics) return { hasPhysics: false, note: 'paused-or-none' };
+    if (mesh && mesh.updateMatrixWorld) mesh.updateMatrixWorld(true);
+    let worst = 0, dynCount = 0;
+    const form = new window.Ammo.btTransform();
+    for (const rb of h.physics.bodies || []) {
+      if (rb.params.type !== 1 || !rb.body || !rb.bone) continue;
+      dynCount++;
+      rb.body.getMotionState().getWorldTransform(form);
+      const o = form.getOrigin();
+      const bm = rb.bone.matrixWorld.elements;
+      const dx = o.x() - bm[12], dy = o.y() - bm[13], dz = o.z() - bm[14];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > worst) worst = d2;
+    }
+    return { hasPhysics: true, bodies: (h.physics.bodies || []).length, dynCount, worstBodyDelta: +Math.sqrt(worst).toFixed(3) };
+  },
+  // 测试辅助：在视口上合成一次 pointer 拖拽（需移动模式开启且该点命中选中模型）
+  dragAt: (clientX, clientY, dx, dy, keys) => {
+    const o = {
+      bubbles: true, cancelable: true, button: 0, pointerId: 9876,
+      shiftKey: !!(keys && keys.shift), ctrlKey: !!(keys && keys.ctrl), metaKey: !!(keys && keys.ctrl),
+    };
+    canvas.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, o, { clientX, clientY })));
+    canvas.dispatchEvent(new PointerEvent('pointermove', Object.assign({}, o, { clientX: clientX + dx, clientY: clientY + dy })));
+    canvas.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, o, { clientX: clientX + dx, clientY: clientY + dy })));
+    return true;
+  },
+  // 测试辅助：按名称查询场景中已放置模型的位置
+  placedMesh: (name) => {
+    const s = (sceneItems || []).find((x) => x.mesh && ((x.node && x.node.name === name) || x.mesh.name === name));
+    return s ? { found: true, pos: s.mesh.position.toArray().map((n) => +n.toFixed(3)) } : { found: false };
+  },
+  // 测试辅助：以「角色模型」方式加载（替换当前模型，非组合放置）
+  loadAsCurrent: async (path, name) => {
+    await loadModel({ path, name: name || '角色', size: 0 }, {});
+    return { ok: true, current: currentModel && currentModel.name };
+  },
+  // 测试辅助：模块作用域访问器（页面 eval 无法直接引用模块变量）
+  current: () => currentMesh,
+  selected: () => composeSelected,
+  meshByName: (name) => {
+    const s = (sceneItems || []).find((x) => x.mesh && x.node && x.node.name === name);
+    return s ? s.mesh : null;
   },
 };

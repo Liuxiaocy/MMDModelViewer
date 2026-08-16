@@ -1494,27 +1494,41 @@ async function runSmokeTest() {
         check('load-cached-model', false, String(e && e.message || e));
       }
 
-      // 6.8 场景视图渲染 + 左侧「已缓存模型」组
+      // 6.8 场景视图渲染 + 左侧「缓存资源」独立面板（模型/场景/动作分类，不再混入文件树）
       try {
         const uiOk = await mainWindow.webContents.executeJavaScript(`
           (async () => {
             const wait = (ms) => new Promise((r) => setTimeout(r, ms));
             const sce = document.querySelector('.lib-card[data-tab="scenes"]');
-            if (!sce) return { error: '无场景入口', sceneRows: 0, groupName: '' };
+            if (!sce) return { error: '无场景入口', sceneRows: 0, cacheSize: '', cats: [] };
             sce.click();
             await wait(600);
             const sceneRows = document.querySelectorAll('#scene-tree .win10-row').length;
+            const cac = document.querySelector('.lib-card[data-tab="cache"]');
+            if (cac) cac.click();
+            await wait(800);
+            const cacheSize = document.getElementById('side-cache-size')
+              ? document.getElementById('side-cache-size').textContent : '';
+            const cats = ['cc-models', 'cc-scenes', 'cc-motions'].map((id) => ({
+              id,
+              rows: document.querySelectorAll('#' + id + ' .scc-row').length,
+              empty: !!document.querySelector('#' + id + ' .scc-empty'),
+            }));
+            // 文件树不再注入「已缓存」组
             const models = document.querySelector('.lib-card[data-tab="models"]');
             if (models) models.click();
             await wait(600);
             const cachedRow = document.querySelector('#file-tree .win10-row[data-path="__cached_models__"]');
-            const groupName = cachedRow ? cachedRow.querySelector('.w10-name').textContent : '';
-            return { sceneRows, groupName };
+            return { sceneRows, cacheSize, cats, treeHasCachedGroup: !!cachedRow };
           })()
         `);
-        const ok = uiOk && !uiOk.error && Number(uiOk.sceneRows) > 0 && /已缓存/.test(uiOk.groupName || '');
+        const ok = uiOk && !uiOk.error
+          && Number(uiOk.sceneRows) > 0
+          && uiOk.cacheSize !== '计算中…' && uiOk.cacheSize !== ''
+          && uiOk.cats.every((c) => c.rows > 0 || c.empty)
+          && !uiOk.treeHasCachedGroup;
         check('scenes-and-cached-group', ok,
-          uiOk.error || `场景行数:${uiOk.sceneRows} 已缓存组:「${uiOk.groupName}」`);
+          uiOk.error || `场景行数:${uiOk.sceneRows} 缓存面板:「${uiOk.cacheSize}」 分类:[${uiOk.cats.map((c) => c.id + '=' + c.rows + (c.empty ? 'E' : '')).join(' ')}] 文件树含已缓存组:${uiOk.treeHasCachedGroup}`);
       } catch (e) {
         check('scenes-and-cached-group', false, String(e && e.message || e));
       }
@@ -1655,7 +1669,7 @@ async function runSmokeTest() {
                   return { status: st, texLoaded: state && state.texLoaded, texTotal: state && state.texTotal, meshCount: state && state.meshCount };
                 })()
               `);
-              const ok2 = loadOk && !loadOk.error && /已加载/.test(loadOk.status || '')
+              const ok2 = loadOk && !loadOk.error && /已(加载|加入场景)/.test(loadOk.status || '')
                 && Number(loadOk.texTotal) > 0 && Number(loadOk.texLoaded) === Number(loadOk.texTotal);
               check('load-cached-whole-package', ok2,
                 loadOk.error || `状态栏:「${loadOk.status}」 tex:${loadOk.texLoaded}/${loadOk.texTotal} mesh:${loadOk.meshCount}`);

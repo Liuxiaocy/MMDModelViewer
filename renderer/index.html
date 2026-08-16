@@ -11,6 +11,8 @@
   <div id="app">
     <!-- 顶部玻璃工具栏 -->
     <header id="toolbar">
+      <button id="btn-toggle-sidebar" class="btn btn-icon btn-toggle" title="收起/展开左侧栏" data-open="◀" data-collapsed="▶">◀</button>
+      <button id="btn-toggle-info" class="btn btn-icon btn-toggle" title="收起/展开信息栏" data-open="▶" data-collapsed="◀">▶</button>
       <span class="app-title">MMD 模型预览器</span>
       <button id="btn-open-model" class="btn btn-primary" title="选择模型/压缩包文件">📂 选择模型…</button>
       <button id="btn-open-archive" class="btn" title="导入压缩包并自动解压">🗜️ 导入压缩包…</button>
@@ -29,6 +31,7 @@
     </header>
 
     <div id="main">
+      <div class="splitter" id="splitter-left" title="拖动调整左侧栏宽度"></div>
       <!-- 左侧面板 -->
       <aside id="sidebar">
         <!-- 库入口卡片 -->
@@ -47,6 +50,16 @@
             <div class="lc-icon">🌆</div>
             <div class="lc-title">场景</div>
             <div class="lc-count" id="lib-scenes-count">—</div>
+          </div>
+          <div class="lib-card" id="lib-cache" data-tab="cache">
+            <div class="lc-icon">💾</div>
+            <div class="lc-title">缓存资源</div>
+            <div class="lc-count" id="lib-cache-count">—</div>
+          </div>
+          <div class="lib-card" id="lib-compose" data-tab="compose">
+            <div class="lc-icon">🧩</div>
+            <div class="lc-title">组合</div>
+            <div class="lc-count" id="lib-compose-count">—</div>
           </div>
           <div class="lib-card" id="lib-recent" data-tab="recent">
             <div class="lc-icon">🕘</div>
@@ -88,6 +101,65 @@
             <div id="scene-tree" class="scene-tree">
               <div class="placeholder">扫描中…</div>
             </div>
+          </div>
+          <div class="side-view hidden" data-view="cache">
+            <div class="panel-title-small">
+              缓存资源
+              <span id="side-cache-size" class="badge-muted">计算中…</span>
+            </div>
+            <div class="cache-cat-list" id="side-cache-list">
+              <div class="cache-cat">
+                <div class="cache-cat-head">🧊 模型 <span class="badge-muted" id="cc-models-count">0</span></div>
+                <div class="cache-cat-body" id="cc-models"></div>
+              </div>
+              <div class="cache-cat">
+                <div class="cache-cat-head">🌆 场景 <span class="badge-muted" id="cc-scenes-count">0</span></div>
+                <div class="cache-cat-body" id="cc-scenes"></div>
+              </div>
+              <div class="cache-cat">
+                <div class="cache-cat-head">🎬 动作 <span class="badge-muted" id="cc-motions-count">0</span></div>
+                <div class="cache-cat-body" id="cc-motions"></div>
+              </div>
+            </div>
+          </div>
+          <div class="side-view hidden" data-view="compose">
+            <div class="panel-title-small">🧩 组合编排</div>
+            <!-- 已加载模型（独立区块：选中/删除/查看所用动作） -->
+            <div class="compose-sec">
+              <div class="compose-sec-head">
+                <span class="compose-sec-label">已加载模型</span>
+                <span id="compose-count" class="badge-muted">0</span>
+              </div>
+              <div id="compose-model-list" class="compose-model-list"></div>
+            </div>
+            <!-- 操作区：选择场景 / 放置模型 / 附加动作 -->
+            <div class="compose-sec compose-sec-ops">
+              <div class="compose-sec-head">
+                <span class="compose-sec-label">操作</span>
+              </div>
+              <div class="compose-step">
+                <div class="step-label">选择场景（加载新场景将替换旧场景）</div>
+                <div class="compose-row">
+                  <div id="compose-scene" class="c-dd"></div>
+                  <button id="btn-compose-scene" class="btn btn-small btn-primary">加载场景</button>
+                </div>
+              </div>
+              <div class="compose-step">
+                <div class="step-label">放置新模型（初始在网格中心，最多 <span id="compose-max-label">3</span> 个）</div>
+                <div class="compose-row">
+                  <div id="compose-model" class="c-dd"></div>
+                  <button id="btn-compose-model" class="btn btn-small btn-primary">放置</button>
+                </div>
+              </div>
+              <div class="compose-step">
+                <div class="step-label">为选中模型附加动作</div>
+                <div class="compose-row">
+                  <div id="compose-motion" class="c-dd"></div>
+                  <button id="btn-compose-motion" class="btn btn-small btn-primary">应用动作</button>
+                </div>
+              </div>
+            </div>
+            <div class="compose-tip">开启工具栏「🖐 移动模式」后，在预览区拖动选中的模型到任意位置。</div>
           </div>
           <div class="side-view hidden" data-view="recent">
             <div class="panel-title-small">最近加载</div>
@@ -140,6 +212,8 @@
         </div>
       </section>
 
+      <div class="splitter" id="splitter-right" title="拖动调整信息栏宽度"></div>
+
       <!-- 右侧信息栏 -->
       <aside id="info-panel">
         <div class="tab-bar" role="tablist">
@@ -171,6 +245,10 @@
           </div>
           <div id="params-anim"    class="param-group" data-group="anim">
             <div class="group-title">🎬 动画</div>
+            <div class="group-rows"></div>
+          </div>
+          <div id="params-compose" class="param-group" data-group="compose">
+            <div class="group-title">🧩 组合</div>
             <div class="group-rows"></div>
           </div>
           <div class="param-actions">
