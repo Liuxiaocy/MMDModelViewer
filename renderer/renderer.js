@@ -1545,7 +1545,14 @@ async function loadModel(node, opts = {}) {
         showModelInfo(mesh, node);
         setupVmdList(mesh);
       }
-      frameAll();
+      // 场景等占用面积大的模型：默认视角定位在网格中心；小尺寸模型保持包围盒取景
+      const b = new THREE.Box3().setFromObject(mesh);
+      const sceneRadius = (() => {
+        const s = b.getSize(new THREE.Vector3());
+        return Math.max(s.x, s.y, s.z) / 2 || 0;
+      })();
+      if (sceneRadius > SCENE_LARGE_RADIUS) frameSceneAtGridCenter();
+      else frameAll();
       const total = sceneItems.some((s) => s.mesh === currentModel)
         ? sceneItems.length
         : sceneItems.length + (currentModel ? 1 : 0);
@@ -1625,6 +1632,26 @@ function frameAll() {
   const dist = radius * 2.6 + 2;
   camera.position.set(dist * 0.7, center.y + radius * 0.8, dist);
   controls.target.set(center.x, center.y, center.z);
+  controls.update();
+}
+// 大面积模型（场景/舞台等）默认视角：对准网格中心（世界原点地面）。
+// 相机贴近地面（高度≈0）、距离限制在包围盒内部 → 默认视角处于场景模型内部，水平看向网格中心。
+const SCENE_LARGE_RADIUS = 10; // 网格半宽 10（GridHelper 20x20），超过即视为大面积
+function frameSceneAtGridCenter() {
+  const targets = [];
+  if (currentModel) targets.push(currentModel);
+  (sceneItems || []).forEach((s) => { if (s && s.mesh) targets.push(s.mesh); });
+  if (!targets.length) return;
+  const box = new THREE.Box3();
+  targets.forEach((t) => box.expandByObject(t));
+  if (box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z) / 2 || 1;
+  // 相机到中心的最大距离取「整体可见距离」与「包围盒内部距离」的较小值，
+  // 并压低相机高度到地面（y≈0），保证默认视角处于场景模型内部而非外部俯瞰
+  const dist = Math.min(radius * 2.6 + 2, radius * 0.7);
+  camera.position.set(dist * 0.7, 0.5, dist);
+  controls.target.set(0, 0, 0);
   controls.update();
 }
 function showModelInfo(mesh, node) {
