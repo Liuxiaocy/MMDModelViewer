@@ -12,9 +12,17 @@ const seven = require('7zip-min');
 const sevenBin = require('7zip-bin');
 const unrar = require('node-unrar-js');
 
-// 冒烟测试使用独立 userData：避免污染真实缓存（真实缓存受系统/沙箱写限制时也影响验证）
+// userData（含 cache 缓存）重定向到安装目录（D 盘），规避系统盘 AppData 的沙箱/权限写限制
+// 开发模式：<项目根>/data；打包后 asar 内不可写，改放 <resources>/appdata
+const CACHE_BASE = app.isPackaged
+  ? path.join(process.resourcesPath, 'appdata')
+  : path.join(__dirname, 'data');
+
+// 冒烟测试使用独立 userData：避免污染真实缓存
 if (process.argv.includes('--smoke-test')) {
   app.setPath('userData', path.join(__dirname, '.smoke-userdata'));
+} else {
+  app.setPath('userData', CACHE_BASE);
 }
 
 const DEFAULT_ROOT = 'D:\\素材\\3D模型';
@@ -551,10 +559,17 @@ function registerIpc() {
       crypto.createHash('sha1').update(keySource).digest('hex').slice(0, 12);
   }
   function safeFilename(name) {
-    return String(name || 'file')
-      .replace(/[\\/:*?"<>|\s]+/g, '_')
-      .replace(/^_+|_+$/g, '')
-      .slice(0, 120) || 'file';
+    // 白名单：只保留 ASCII 字母/数字/._-，其余（中文/日文/空格/%#?&+ 等）一律替换为下划线
+    let s = String(name || 'file')
+      .replace(/[^A-Za-z0-9._-]+/g, '_')
+      .replace(/_+/g, '_')                    // 连续下划线合并
+      .replace(/^_+|_+$/g, '')                // 去掉首尾下划线
+      .replace(/^\.+|\.+$/g, '')            // 去掉首尾点（避免 .. 或隐藏文件）
+      .slice(0, 100);
+    if (!s) s = 'file';
+    // Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）加前缀避免冲突
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(s)) s = '_' + s;
+    return s;
   }
 
   // ---- IPC: 缓存目录信息 ----
@@ -571,13 +586,45 @@ function registerIpc() {
     };
   });
 
-  // ---- IPC: 获取缓存索引 ----
+  // ---- IPC: 获取缓存索引（带自愈：修正 cachePath 失效的旧条目） ----
   ipcMain.handle('get-cache-index', async () => {
     await ensureCacheDirs();
-    const idx = await readIndex();
+    const idx = await repairCacheIndex();
     const totalSize = (idx.items || []).reduce((s, it) => s + (Number(it.cacheSize) || 0), 0);
     return { index: idx, totalSize };
   });
+
+  // 自愈：早期版本整包缓存的 cachePath 缺子目录层级（只写文件名），导致加载时路径不存在。
+  // 遍历 index：cachePath 指向的文件不存在时，在 srcDir 缓存目录内按文件名递归查找真实路径并修正。
+  async function repairCacheIndex() {
+    const p = await ensureCacheDirs();
+    const idx = await readIndex();
+    let changed = false;
+    for (const it of Array.isArray(idx.items) ? idx.items : []) {
+      if (!it || !it.cachePath) continue;
+      const abs = String(it.cachePath).startsWith(p.root)
+        ? String(it.cachePath)
+        : path.join(p.root, String(it.cachePath));
+      try { await fsp.access(abs); continue; } catch (_) { /* 失效，尝试修正 */ }
+      if (!it.srcDir) continue;
+      const absDir = String(it.srcDir).startsWith(p.root)
+        ? String(it.srcDir)
+        : path.join(p.root, String(it.srcDir));
+      const base = path.basename(String(it.cachePath)).toLowerCase();
+      let fixed = null;
+      try {
+        const hits = await findFilesByExt(absDir, new Set(['.pmx', '.pmd', '.vmd', '.vpd']));
+        fixed = hits.find((f) => path.basename(f).toLowerCase() === base) || null;
+      } catch (_) { /* noop */ }
+      if (fixed) {
+        it.cachePath = path.relative(p.root, fixed).split(path.sep).join('/');
+        changed = true;
+        console.log('[cache] repaired cachePath:', it.name, '->', it.cachePath);
+      }
+    }
+    if (changed) await writeIndex(idx);
+    return idx;
+  }
 
   // ---- IPC: 写入缩略图 PNG 并更新 index.thumb ----
   ipcMain.handle('write-cache-thumb', async (_e, { id, base64Png }) => {
@@ -973,11 +1020,72 @@ function registerIpc() {
     }
     return out;
   }
+  // 贴图引用缺失回退补全：源模型 PMX 常引用 zip 中不存在的贴图（如仅含 _1~_9/_A 变体，
+  // 而无 Tex_0122.png 本体）。缓存后把同前缀变体文件补成缺失文件名，保证材质贴图齐全。
+  async function backfillMissingTextures(modelDir, pmxFile) {
+    try {
+      const mmd = await import('three/examples/jsm/libs/mmdparser.module.js');
+      const parser = new mmd.MMDParser.Parser();
+      const buf = await fsp.readFile(path.join(modelDir, pmxFile));
+      const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      const data = parser.parsePmx(ab);
+      let fixed = 0;
+      for (const mat of Array.isArray(data.materials) ? data.materials : []) {
+        for (const idx of [mat.textureIndex, mat.sphereTextureIndex]) {
+          if (!(idx >= 0) || !data.textures || !data.textures[idx]) continue;
+          const tp = String(data.textures[idx]).replace(/\\/g, '/');
+          if (!tp) continue;
+          const abs = path.join(modelDir, tp);
+          try { await fsp.access(abs); continue; } catch (_) { /* 缺失则回退 */ }
+          const dir = path.dirname(abs);
+          const base = path.basename(tp);
+          const stem = base.replace(/\.[^.]+$/, '').toLowerCase();
+          const baseLower = base.toLowerCase();
+          let entries = [];
+          try { entries = await fsp.readdir(dir); } catch (_) { entries = []; }
+          const cand = entries
+            .filter((n) => {
+              const nl = n.toLowerCase();
+              return nl !== baseLower
+                && nl.startsWith(stem)
+                && path.extname(n).toLowerCase() === path.extname(base).toLowerCase();
+            })
+            // 优先 _A（albedo）变体，其次按名称自然顺序
+            .sort((a, b) => {
+              const pa = /_a\.[^.]+$/.test(a.toLowerCase()) ? 0 : 1;
+              const pb = /_a\.[^.]+$/.test(b.toLowerCase()) ? 0 : 1;
+              return pa - pb || a.localeCompare(b);
+            })[0];
+          if (!cand) continue;
+          try {
+            await fsp.copyFile(path.join(dir, cand), abs);
+            fixed++;
+            console.log('[cache] backfill texture:', base, '<-', cand);
+          } catch (e) { /* noop */ }
+        }
+      }
+      if (fixed > 0) console.log('[cache] backfillMissingTextures: 补齐', fixed, '张贴图于', modelDir);
+      return fixed;
+    } catch (e) {
+      console.error('[cache] backfillMissingTextures failed:', (e && e.message) || e);
+      return 0;
+    }
+  }
+
   async function copyOne(candidate, cpaths, existingIds) {
     const { id, type, name, ext, sourcePath, sourceType, archiveEntry } = candidate;
     if (existingIds.has(String(id))) {
       return { succeeded: false, skipped: true, reason: 'already_cached' };
     }
+    // 是否来自场景根目录（<默认根>/场景）：用于左侧「场景」卡片展示缓存场景模型
+    const isSceneSource = (() => {
+      try {
+        const prefix = SCENE_ROOT.endsWith(path.sep) ? SCENE_ROOT : SCENE_ROOT + path.sep;
+        const src = String(sourcePath || '').replace(/\\/g, '/').toLowerCase();
+        const pref = prefix.replace(/\\/g, '/').toLowerCase();
+        return src.startsWith(pref);
+      } catch (_) { return false; }
+    })();
     const extDot = '.' + String(ext || '').toLowerCase();
     const safeBase = safeFilename(String(name || 'file'));
     const shortId = String(id).replace(/^(m_|v_)/, '').slice(0, 8);
@@ -1012,6 +1120,24 @@ function registerIpc() {
         await fsp.mkdir(absDir, { recursive: true });
         // 递归复制整个解压目录（fs.cp 需 Node 16.7+，Electron 内置 Node 满足）
         await fsp.cp(dest, absDir, { recursive: true, force: true });
+        // 同压缩包多模型冗余清理：散落结构（模型文件与贴图文件夹都直接放在压缩包根）时，
+        // 整包复制会把其他模型的 .pmx/.pmd 也拷进来。只保留目标模型，贴图/资源目录保留共享。
+        try {
+          const targetBase = path.basename(found).toLowerCase();
+          const topEntries = await fsp.readdir(absDir, { withFileTypes: true });
+          for (const ent of topEntries) {
+            if (ent.isFile() && /\.(pmx|pmd)$/i.test(ent.name) && ent.name.toLowerCase() !== targetBase) {
+              await fsp.rm(path.join(absDir, ent.name), { force: true });
+              console.log('[cache] prune sibling model file:', ent.name);
+            }
+          }
+        } catch (_) { /* 清理失败不影响主流程 */ }
+        // 贴图引用缺失回退补全（源模型缺陷：PMX 引用 zip 中不存在的贴图文件）
+        // 相对路径必须基于解压根 dest 计算（found 可能在子目录，也可能在根目录）；
+        // 若落在解压根之外则退化为仅用文件名
+        const relInArchive = path.relative(dest, found);
+        const relPmxInDir = (relInArchive.startsWith('..') ? path.basename(found) : relInArchive).split(path.sep).join('/');
+        await backfillMissingTextures(absDir, relPmxInDir);
         const cacheSize = await calcDirSize(absDir);
         return {
           succeeded: true,
@@ -1024,10 +1150,13 @@ function registerIpc() {
             sourceType: 'archive',
             archiveEntry: archiveEntry || null,
             srcDir: relDir,
-            cachePath: relDir + '/' + path.basename(found),
+            // 模型可能在解压包子目录中（整包复制保留了相对结构），cachePath 必须包含子目录层级，
+            // 否则加载时拼出的路径不存在（mmd:// 404 → 加载模型失败）
+            cachePath: relDir + '/' + relPmxInDir,
             thumb: null,
             cacheSize,
             addedAt: Date.now(),
+            scene: isSceneSource,
           },
         };
       } catch (e) {
@@ -1091,6 +1220,7 @@ function registerIpc() {
           thumb: null,
           cacheSize,
           addedAt: Date.now(),
+          scene: isSceneSource,
         },
       };
     } catch (e) {
@@ -1343,7 +1473,13 @@ async function runSmokeTest() {
             const tab = document.querySelector('#info-panel .tab-btn[data-tab="cache"]');
             if (tab) tab.click();
             await wait(800);
-            const btn = document.querySelector('.cache-rows .cc-load');
+            // 优先点击「模型」行（加载按钮），避免候选顺序不同导致点到动作行
+            const rows = [...document.querySelectorAll('.cache-rows .cache-row')];
+            const modelRow = rows.find((r) => {
+              const b = r.querySelector('.cc-load');
+              return b && b.textContent.trim() === '加载';
+            }) || rows[0];
+            const btn = modelRow ? modelRow.querySelector('.cc-load') : null;
             if (!btn) return { error: '缓存 Tab 无加载按钮（未渲染）', status: '', detail: '' };
             btn.click();
             await wait(5000);

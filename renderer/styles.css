@@ -143,6 +143,13 @@ body {
 }
 .btn-small { padding: 4px 12px; font-size: 11px; }
 .btn:disabled { opacity: 0.40; cursor: not-allowed; transform: none; box-shadow: none; }
+/* 切换按钮的激活态（如「移动模式」） */
+.btn.active {
+  background: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.16);
+}
 
 /* ---- 主体三栏 ---- */
 #main { display: flex; flex: 1; min-height: 0; }
@@ -1169,10 +1176,7 @@ dialog.glass-modal::backdrop {
   flex-direction: column;
   gap: 2px;
 }
-.pick-list li {
-  padding: 4px 6px;
-  border-radius: 4px;
-}
+.pick-list li { padding: 4px 6px; border-radius: 4px; }
 .pick-list li:hover { background: var(--bg-hover); }
 .pick-list li label {
   display: flex;
@@ -1184,3 +1188,69 @@ dialog.glass-modal::backdrop {
 }
 .pick-list li label > small { color: var(--text-dim); font-size: 10px; word-break: break-all; }
 .pick-list li.muted { color: var(--text-muted); }
+
+/* ================= 响应式布局：窗口缩放 / 页面放大时组件不裁剪 ================= */
+/* 侧栏宽度随窗口弹性缩放（clamp：窗口大时取 vw，窗口小时有下限） */
+#sidebar { width: clamp(200px, 22vw, 300px); min-width: 170px; }
+#info-panel { width: clamp(200px, 20vw, 280px); min-width: 170px; }
+
+/* 工具栏允许换行，窄窗口时按钮折行而不是被裁掉 */
+#toolbar { flex-wrap: wrap; row-gap: 8px; }
+
+/* 根路径胶囊在窄屏收缩 */
+.root-path { max-width: min(360px, 26vw); }
+
+/* 浮动面板/弹层不超过视口宽度 */
+.anim-panel { width: min(280px, 62vw); max-width: calc(100vw - 24px); }
+#preview-card { width: min(340px, 70vw); max-width: calc(100vw - 24px); }
+#archive-preview { width: min(520px, 88vw); }
+dialog.glass-modal { width: min(520px, 92vw); }
+
+/* 中等窗口：侧栏收窄，工具栏隐藏路径胶囊 */
+@media (max-width: 1200px) {
+  #sidebar { width: clamp(180px, 20vw, 260px); min-width: 160px; }
+  #info-panel { width: clamp(180px, 19vw, 250px); min-width: 160px; }
+  .root-path { display: none; }
+}
+
+/* 较窄窗口：进一步收窄侧栏，压缩非核心控件 */
+@media (max-width: 980px) {
+  #sidebar { width: 44vw; min-width: 150px; }
+  #info-panel { width: 38vw; min-width: 150px; }
+  .app-title { display: none; }
+  #btn-choose-dir { display: none; }
+  /* 缓存行列表去掉扩展名/类型列：图标 | 名称 | 大小 | 操作 */
+  .cache-row { grid-template-columns: 20px minmax(0, 1fr) 56px auto; }
+  .cr-ext, .cr-type { display: none; }
+  /* 浮动面板贴边压缩 */
+  #preview-card { left: 8px; top: 8px; width: min(320px, 84vw); }
+  .anim-panel { right: 8px; bottom: 8px; width: min(260px, 84vw); }
+  .view-hint { display: none; }
+  .tab-btn { padding: 6px 8px; font-size: 11px; }
+  .panel-title { font-size: 11px; }
+}
+
+/* 窄窗口 / 页面放大后：左右栏再压缩，次要按钮与信息隐藏 */
+@media (max-width: 760px) {
+  #sidebar { width: 52vw; min-width: 130px; }
+  #info-panel { width: 44vw; min-width: 130px; }
+  #btn-open-archive, #btn-refresh { display: none; }
+  #btn-reset-view { display: none; }
+  .library-cards { flex-wrap: wrap; }
+  .lib-card { flex: 1 1 40%; min-width: 80px; }
+  .cache-toolbar-row { flex-wrap: wrap; }
+  .cache-actions { margin-left: 0; justify-content: flex-start; }
+  .segmented .seg { padding: 4px 8px; font-size: 11px; }
+  .nav-btns { gap: 2px; }
+  .crumb { max-width: 88px; overflow: hidden; text-overflow: ellipsis; }
+  #statusbar { flex-wrap: wrap; gap: 4px 12px; }
+  .speed-label { display: none; }
+}
+
+/* 窗口过矮：预览卡与弹层内容压缩，避免超出屏幕 */
+@media (max-height: 560px) {
+  #preview-card { max-height: 72%; }
+  .pc-body { max-height: 64vh; }
+  .modal-body { max-height: 72vh; }
+  .vmd-list { max-height: 90px; }
+}
