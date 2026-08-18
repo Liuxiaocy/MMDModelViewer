@@ -11,6 +11,7 @@ smoke-out.txt
 .smoke-userdata/
 .probe-userdata/
 data/
+mods/
 *.log
 
 # 本地技能部署（按项目手动复制，不入库）

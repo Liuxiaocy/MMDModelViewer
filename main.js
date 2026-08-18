@@ -12,11 +12,13 @@ const seven = require('7zip-min');
 const sevenBin = require('7zip-bin');
 const unrar = require('node-unrar-js');
 
-// userData（含 cache 缓存）重定向到安装目录（D 盘），规避系统盘 AppData 的沙箱/权限写限制
-// 开发模式：<项目根>/data；打包后 asar 内不可写，改放 <resources>/appdata
-const CACHE_BASE = app.isPackaged
-  ? path.join(process.resourcesPath, 'appdata')
-  : path.join(__dirname, 'data');
+// 软件安装目录：打包（安装/便携版）后为可执行文件所在目录（如 D:\Program Files\MMDModelViewer），
+// 开发模式为项目根目录；默认根目录与缓存目录均基于它派生
+const APP_DIR = app.isPackaged ? path.dirname(process.execPath) : __dirname;
+
+// userData（含 settings.json 设置与 Cache 缓存）重定向到 <安装目录>/data，
+// 规避系统盘 AppData 的沙箱/权限写限制；开发模式为 <项目根>/data
+const CACHE_BASE = path.join(APP_DIR, 'data');
 
 // 冒烟测试使用独立 userData：避免污染真实缓存
 if (process.argv.includes('--smoke-test')) {
@@ -25,7 +27,8 @@ if (process.argv.includes('--smoke-test')) {
   app.setPath('userData', CACHE_BASE);
 }
 
-const DEFAULT_ROOT = 'D:\\素材\\3D模型';
+// 默认根目录：<安装目录>/mods（模型/动作/场景资源默认存放处）
+const DEFAULT_ROOT = path.join(APP_DIR, 'mods');
 
 // ---------- 根目录设置（用户自定义，持久化 userData/settings.json） ----------
 // root 为空字符串时回退 DEFAULT_ROOT；动作库/场景库固定为其下「动作」「场景」子目录
@@ -551,7 +554,8 @@ function registerIpc() {
   // ========== 缓存资源识别 & 管理 ==========
 
   function cachePaths() {
-    const root = path.join(app.getPath('userData'), 'cache');
+    // 缓存根目录：<userData>/Cache（安装后即 <安装目录>/data/Cache）
+    const root = path.join(app.getPath('userData'), 'Cache');
     return {
       root,
       models:  path.join(root, 'models'),
@@ -1683,7 +1687,7 @@ async function runSmokeTest() {
                return { target, done, item };
             })()
           `);
-          const cacheRoot = path.join(app.getPath('userData'), 'cache');
+          const cacheRoot = path.join(app.getPath('userData'), 'Cache');
           let dirOk = false, dirInfo = '';
           if (uiOk && !uiOk.error && uiOk.item && uiOk.item.srcDir) {
             const absDir = path.join(cacheRoot, String(uiOk.item.srcDir).replace(/^models[/\\]/, 'models/'));
@@ -1746,6 +1750,8 @@ async function runSmokeTest() {
 // ---------- 启动 ----------
 app.whenReady().then(() => {
   console.log('[main] ready, argv:', JSON.stringify(process.argv));
+  // 首次运行确保默认根目录（<安装目录>/mods）存在，避免空目录报错
+  try { fs.mkdirSync(DEFAULT_ROOT, { recursive: true }); } catch (_) { /* ignore */ }
   registerMmdProtocol();
   registerIpc();
 
