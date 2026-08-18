@@ -51,9 +51,11 @@ function sceneRootOf(base) { return path.join(base, '场景'); }
 loadRootSettings();
 
 // 支持的模型 / 压缩包 / 文本扩展名
+// max/blend 为专有二进制格式，仅识别分类（可选中/缓存/入库），3D 预览走渲染层分流提示
 const MODEL_EXTS = new Set([
   '.pmx', '.pmd', '.vmd', '.vpd',
   '.gltf', '.glb', '.obj', '.fbx', '.stl', '.dae', '.ply', '.3ds',
+  '.max', '.blend',
 ]);
 const ARCHIVE_EXTS = new Set(['.rar', '.zip', '.7z', '.tar', '.gz', '.xz']);
 const TEXT_EXTS = new Set(['.txt', '.md', '.json', '.cfg', '.ini', '.log', '.csv', '.xml', '.yaml', '.yml']);
@@ -81,7 +83,7 @@ function createWindow() {
     height: 900,
     minWidth: 1000,
     minHeight: 640,
-    backgroundColor: '#F7F8FB',
+    backgroundColor: '#0B0E14',
     title: 'MMDModelViewer - 本地3D模型预览器',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -134,7 +136,26 @@ function registerMmdProtocol() {
       let filePath = decodeURIComponent(url.pathname).replace(/^\//, '');
       filePath = path.resolve(filePath);
       if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-        return new Response('Not Found', { status: 404 });
+        // 贴图绝对路径兜底：部分游戏导出的 FBX 在二进制内记录作者机器的绝对贴图路径
+        // （如 D:\Datamine\Fmodel\...\T_xxx.png），FBXLoader 拼到 mmd:// URL 后指向不存在的
+        // 文件导致 404、模型显示为白色。此时按 URL 末尾文件名，沿目录链向上找「最近的已存在
+        // 目录」重新定位（通常即模型所在目录），兜底解析贴图。
+        if (/\.(png|jpe?g|bmp|gif|webp|tga|dds)$/i.test(filePath)) {
+          const bn = path.basename(filePath);
+          let dir = path.dirname(filePath);
+          while (dir && dir !== path.dirname(dir)) {
+            try {
+              if (fs.statSync(dir).isDirectory()) {
+                const cand = path.join(dir, bn);
+                if (fs.existsSync(cand) && fs.statSync(cand).isFile()) { filePath = cand; break; }
+              }
+            } catch (_) { /* 该层目录不存在，继续上溯 */ }
+            dir = path.dirname(dir);
+          }
+        }
+        if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+          return new Response('Not Found', { status: 404 });
+        }
       }
       const data = await fs.promises.readFile(filePath);
       const ext = path.extname(filePath).toLowerCase();
@@ -786,9 +807,8 @@ function registerIpc() {
 
   function classifyExt(ext) {
     const e = String(ext || '').toLowerCase();
-    if (e === '.pmx' || e === '.pmd') return 'model';
-    if (e === '.vmd' || e === '.vpd') return 'motion';
-    return null;
+    if (!MODEL_EXTS.has(e)) return null;
+    return e === '.vmd' || e === '.vpd' ? 'motion' : 'model';
   }
   function isArchiveFile(name) {
     return ARCHIVE_EXTS.has(path.extname(String(name || '').toLowerCase()));
@@ -1734,6 +1754,30 @@ async function runSmokeTest() {
         }
       } catch (e) {
         check('cache-whole-package', false, String(e && e.message || e));
+      }
+      // 6.11 主流通用格式加载探针（仅 --generic-probe + GENERIC_PROBE_DIR 时执行，不影响常规冒烟）
+      try {
+        const probeDir = process.env.GENERIC_PROBE_DIR;
+        if (process.argv.includes('--generic-probe') && probeDir && fs.existsSync(probeDir)) {
+          const supported = new Set(['gltf', 'glb', 'obj', 'fbx', 'stl', 'dae', 'ply', '3ds']);
+          const files = fs.readdirSync(probeDir).filter((f) => {
+            if (!supported.has(path.extname(f).toLowerCase().replace(/^\./, ''))) return false;
+            try { return fs.statSync(path.join(probeDir, f)).isFile(); } catch (_) { return false; }
+          });
+          for (const f of files) {
+            const full = path.join(probeDir, f);
+            const ext = path.extname(f).toLowerCase().replace(/^\./, '');
+            const r = await mainWindow.webContents.executeJavaScript(
+              `window.__mmdTest.genericProbe(${JSON.stringify(full)})`
+            );
+            check('generic-' + ext, r && r.ok,
+              r && r.ok
+                ? `包围盒 ${(r.size || []).join(' x ')} mesh=${r.meshes} verts=${r.verts}`
+                : (r && r.error || 'no result'));
+          }
+        }
+      } catch (e) {
+        check('generic-probe', false, String(e && e.message || e));
       }
     }
   } catch (err) {

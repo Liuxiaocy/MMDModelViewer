@@ -9,10 +9,21 @@ import { OutlinePass } from '../node_modules/three/examples/jsm/postprocessing/O
 import { ShaderPass } from '../node_modules/three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from '../node_modules/three/examples/jsm/postprocessing/OutputPass.js';
 import { FXAAShader } from '../node_modules/three/examples/jsm/shaders/FXAAShader.js';
+import { GLTFLoader } from '../node_modules/three/examples/jsm/loaders/GLTFLoader.js';
+import { OBJLoader } from '../node_modules/three/examples/jsm/loaders/OBJLoader.js';
+import { MTLLoader } from '../node_modules/three/examples/jsm/loaders/MTLLoader.js';
+import { FBXLoader } from '../node_modules/three/examples/jsm/loaders/FBXLoader.js';
+import { TDSLoader } from '../node_modules/three/examples/jsm/loaders/TDSLoader.js';
+import { STLLoader } from '../node_modules/three/examples/jsm/loaders/STLLoader.js';
+import { PLYLoader } from '../node_modules/three/examples/jsm/loaders/PLYLoader.js';
+import { ColladaLoader } from '../node_modules/three/examples/jsm/loaders/ColladaLoader.js';
 
 const api = window.mmdAPI;
 const MOTION_EXTS_RE = /\.(vmd|vpd)$/i;
-const MODEL_MESH_RE = /\.(pmx|pmd)$/i;
+// 可直接 3D 预览的网格格式（MMD + 主流通用格式）
+const MODEL_MESH_RE = /\.(pmx|pmd|gltf|glb|obj|fbx|stl|dae|ply|3ds)$/i;
+// 专有二进制格式：仅识别分类（可选中/缓存/入库），无法在浏览器端解析预览
+const NON_PREVIEW_RE = /\.(max|blend)$/i;
 const ARCHIVE_RE = /\.(zip|7z|rar|tar|gz|xz|tgz|txz)$/i;
 
 // ---------- DOM ----------
@@ -1177,8 +1188,14 @@ function buildPreviewCardHtml(node) {
       : '请先加载一个模型再应用此动作'}</div></div>`;
   } else if (isModelMesh) {
     html += `<div class="section">模型预览</div>`;
-    html += `<div class="kv"><div class="k">可加载</div><div class="v">${/\.pmx$/i.test(node.name) ? 'PMX（完整支持）' : 'PMD（完整支持）'}</div></div>`;
+    const mExt = (node.name.split('.').pop() || '').toUpperCase();
+    html += `<div class="kv"><div class="k">可加载</div><div class="v">${/\.pmx$/i.test(node.name) ? 'PMX（完整支持）' : /\.pmd$/i.test(node.name) ? 'PMD（完整支持）' : `${mExt}（通用格式预览）`}</div></div>`;
     html += `<div class="kv"><div class="k">操作</div><div class="v" style="font-size:11px;color:var(--text-muted);">左键旋转 · 右键平移 · 滚轮缩放</div></div>`;
+  } else if (NON_PREVIEW_RE.test(node.name)) {
+    const mExt = (node.name.split('.').pop() || '').toUpperCase();
+    html += `<div class="section">模型预览</div>`;
+    html += `<div class="kv"><div class="k">格式</div><div class="v">${mExt}（建模软件专有二进制格式）</div></div>`;
+    html += `<div class="kv"><div class="k">预览</div><div class="v" style="color:var(--warn);">该格式无法在浏览器端解析，暂不支持 3D 预览</div></div>`;
   } else if (isArchive) {
     html += `<div class="section">压缩包预览</div>`;
     html += `<div class="kv"><div class="k">类型</div><div class="v">${guessArchiveKind(node.name)}</div></div>`;
@@ -1302,7 +1319,7 @@ async function handleArchive(node) {
       const tr = document.createElement('tr');
       const ename = String(e.name || '').replace(/\\/g, '/');
       const isDir = ename.endsWith('/');
-      const nIcon = isDir ? '📁' : MODEL_MESH_RE.test(ename) ? '🧊' : MOTION_EXTS_RE.test(ename) ? '🎬' : /\.(png|jpg|bmp|tga|dds)$/i.test(ename) ? '🖼️' : '📄';
+      const nIcon = isDir ? '📁' : (MODEL_MESH_RE.test(ename) || NON_PREVIEW_RE.test(ename)) ? '🧊' : MOTION_EXTS_RE.test(ename) ? '🎬' : /\.(png|jpg|bmp|tga|dds)$/i.test(ename) ? '🖼️' : '📄';
       tr.innerHTML = `
         <td class="name-cell" title="${escapeHtml(ename)}"><span style="margin-right:6px;">${nIcon}</span>${escapeHtml(pathBasename(ename))}${isDir ? '/' : ''}</td>
         <td class="size-cell">${isDir ? '—' : fmtSize(e.size)}</td>
@@ -1849,6 +1866,19 @@ function fixEmptyMorphAttributes(root) {
 async function loadModel(node, opts = {}) {
   const asScene = !!opts.asScene;   // true = 加入场景（保留当前角色模型）；false = 替换当前角色模型
   const url = api.mmdUrl(node.path);
+
+  // 专有二进制格式（MAX/BLEND）：仅识别分类，无法在浏览器端 3D 预览
+  if (NON_PREVIEW_RE.test(node.name || '')) {
+    const ext = (node.name || '').split('.').pop().toUpperCase();
+    setStatus(`已识别 ${ext} 格式，但该专有二进制格式暂不支持 3D 预览`, 'warn', node.name);
+    return;
+  }
+  // 主流通用格式（FBX/OBJ/GLB/3DS/STL/PLY/DAE）：走通用加载管线（无 IK/物理/MMD 动作）
+  if (MODEL_MESH_RE.test(node.name || '') && !/\.(pmx|pmd)$/i.test(node.name)) {
+    await loadGenericModel(node, url, asScene, opts);
+    return;
+  }
+
   setStatus('正在加载模型 ' + node.name + ' …');
   if (!asScene) {
     clearModel();
@@ -1960,6 +1990,128 @@ async function loadModel(node, opts = {}) {
     console.error(err);
   }
 }
+// 按格式解析主流通用 3D 文件为模型根对象（不加入场景）：FBX / OBJ(+MTL) / GLB / GLTF / 3DS / STL / PLY / DAE
+function parseGenericRoot(url, name) {
+  const ext = (name || '').split('.').pop().toLowerCase();
+  const base = url.slice(0, url.lastIndexOf('/') + 1);
+  switch (ext) {
+    case 'glb':
+    case 'gltf': {
+      return new Promise((resolve, reject) => {
+        new GLTFLoader().load(url, (gltf) => resolve(gltf.scene || gltf), undefined, reject);
+      });
+    }
+    case 'obj': {
+      // 尝试加载同名 MTL（贴图/材质），失败则回退为无材质 OBJ
+      const mtlUrl = base + name.replace(/\.obj$/i, '') + '.mtl';
+      return Promise.resolve().then(() =>
+        new Promise((resolve, reject) => {
+          new MTLLoader().setResourcePath(base).load(mtlUrl, resolve, undefined, reject);
+        })
+      ).then((mtl) => {
+        const objLoader = new OBJLoader();
+        if (mtl && mtl.materials) {
+          mtl.preload();
+          objLoader.setMaterials(mtl);
+        }
+        return new Promise((resolve, reject) => {
+          objLoader.load(url, resolve, undefined, reject);
+        });
+      }).catch(() => new Promise((resolve, reject) => {
+        new OBJLoader().load(url, resolve, undefined, reject);
+      }));
+    }
+    case 'fbx': {
+      return new Promise((resolve, reject) => {
+        new FBXLoader().setResourcePath(base).load(url, resolve, undefined, reject);
+      });
+    }
+    case '3ds': {
+      return new Promise((resolve, reject) => {
+        new TDSLoader().setResourcePath(base).load(url, resolve, undefined, reject);
+      });
+    }
+    case 'dae': {
+      return new Promise((resolve, reject) => {
+        // 注意：不能 setPath(base) —— ColladaLoader 内部会用 this.path 作为 FileLoader 前缀拼到完整 URL 上导致双重路径
+        new ColladaLoader().setResourcePath(base).load(url, (c) => resolve(c.scene), undefined, reject);
+      });
+    }
+    case 'stl':
+    case 'ply': {
+      return new Promise((resolve, reject) => {
+        const Loader = ext === 'stl' ? STLLoader : PLYLoader;
+        new Loader().load(url, (g) => {
+          if (g) {
+            if (!g.attributes.normal || !g.attributes.normal.count) g.computeVertexNormals();
+            // 无材质几何体：包一层标准材质网格，保证在 PBR 环境下可见
+            resolve(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ roughness: 0.7, metalness: 0.1, side: THREE.DoubleSide })));
+          } else resolve(null);
+        }, undefined, reject);
+      });
+    }
+    default:
+      return Promise.reject(new Error('暂不支持预览该格式：' + name));
+  }
+}
+
+// 通用 3D 格式加载：与 MMD 管线不同，无骨骼 IK / 物理 / VMD 动作，仅静态预览（GLB/FBX 内置动画不驱动）
+function loadGenericModel(node, url, asScene, opts = {}) {
+  const name = node.name || '';
+  const ext = name.split('.').pop().toLowerCase();
+  if (!asScene) {
+    clearModel();
+    currentModelPath = node.path;
+  }
+  setStatus('正在加载模型 ' + name + ' …');
+  return parseGenericRoot(url, name).then((root) => {
+    if (!root) throw new Error('加载器未返回模型数据');
+    root.name = name;
+    root.userData.path = node.path;
+    scene.add(root);
+    refreshOutlineSelection();
+
+    if (asScene) {
+      // ====== 场景模型：加入场景，不动角色模型 ======
+      const kind = opts.kind || 'scene';
+      if (kind === 'scene') removeSceneItems((s) => s.kind === 'scene');
+      sceneItems.push({ mesh: root, node, kind });
+      if (opts.initialPosition) {
+        root.position.set(opts.initialPosition.x, opts.initialPosition.y, opts.initialPosition.z);
+      }
+      if (!currentModel) {
+        currentModel = root;
+        currentMesh = root;
+        currentModelPath = node.path;
+        showModelInfo(root, node);
+      }
+      if (kind === 'scene') {
+        const b = new THREE.Box3().setFromObject(root);
+        const s = b.getSize(new THREE.Vector3());
+        if (Math.max(s.x, s.y, s.z) / 2 > SCENE_LARGE_RADIUS) frameSceneAtGridCenter();
+        else frameAll();
+      }
+      const total = sceneItems.some((s) => s.mesh === currentModel)
+        ? sceneItems.length
+        : sceneItems.length + (currentModel ? 1 : 0);
+      updateLibCounts();
+      if (activeTab === 'compose') renderComposePanel();
+      setStatus(`已加入场景：${node.name}`, 'info', `场景中 ${total} 个模型`);
+      return;
+    }
+
+    // ====== 角色模型：替换当前（场景模型保留） ======
+    currentModel = root;
+    currentMesh = root;
+    frameModel(root);
+    showModelInfo(root, node);
+    setStatus(`已加载：${node.name}`, 'info', `${ext.toUpperCase()} 格式 · 静态预览（无 IK/物理/MMD 动作）`);
+  }).catch((err) => {
+    setStatus('加载模型失败：' + (err && err.message || err), 'error');
+    console.error(err);
+  });
+}
+
 function findDirNode(rootNode, filePath) {
   if (!rootNode) return null;
   const parentPath = filePath.replace(/\\/g, '/').split('/').slice(0, -1).join('/');
@@ -3499,6 +3651,25 @@ window.__mmdTest = {
     fixEmptyMorphAttributes(mesh);
     const box = new THREE.Box3().setFromObject(mesh);
     return { ok: true, size: box.getSize(new THREE.Vector3()).toArray().map((n) => n.toFixed(2)) };
+  },
+  // 通用格式探针：与 loadGenericModel 共用 parseGenericRoot，验证各格式加载链路
+  genericProbe: async (filePath) => {
+    try {
+      const url = api.mmdUrl(filePath);
+      const root = await parseGenericRoot(url, pathBasename(filePath));
+      if (!root) return { ok: false, error: '加载器返回空' };
+      const box = new THREE.Box3().setFromObject(root);
+      let meshes = 0, verts = 0;
+      root.traverse((o) => {
+        if (!o.isMesh) return;
+        meshes++;
+        const g = o.geometry;
+        if (g && g.attributes && g.attributes.position) verts += g.attributes.position.count;
+      });
+      return { ok: true, size: box.getSize(new THREE.Vector3()).toArray().map((n) => n.toFixed(2)), meshes, verts };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e) };
+    }
   },
   renderShot: async (filePath) => {
     const url = api.mmdUrl(filePath);

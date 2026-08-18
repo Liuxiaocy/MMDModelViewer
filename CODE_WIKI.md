@@ -142,8 +142,8 @@ MMDModelViewer/
 
 | 常量 | 值 | 说明 |
 | --- | --- | --- |
-| `DEFAULT_ROOT` | `D:\素材\3D模型` | 默认扫描根目录 |
-| `MODEL_EXTS` | `.pmx .pmd .vmd .vpd .gltf .glb .obj .fbx .stl .dae .ply .3ds` | 模型扩展名集合 |
+| `DEFAULT_ROOT` | `<安装目录>/mods`（开发模式 `<项目根>/mods`） | 默认扫描根目录 |
+| `MODEL_EXTS` | `.pmx .pmd .vmd .vpd .gltf .glb .obj .fbx .stl .dae .ply .3ds .max .blend` | 模型扩展名集合（max/blend 为专有二进制格式，仅识别分类不可预览） |
 | `ARCHIVE_EXTS` | `.rar .zip .7z` | 压缩包扩展名集合 |
 | `TEXT_EXTS` | `.txt .md .json .cfg .ini` | 文本扩展名集合 |
 | `MIME_TYPES` | png/jpg/bmp/gif/webp/tga/dds/pmx/pmd/vmd/vpd/txt/json | mmd:// 响应 Content-Type 映射 |
