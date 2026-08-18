@@ -11,24 +11,32 @@
   <div id="app">
     <!-- 顶部玻璃工具栏 -->
     <header id="toolbar">
-      <button id="btn-toggle-sidebar" class="btn btn-icon btn-toggle" title="收起/展开左侧栏" data-open="◀" data-collapsed="▶">◀</button>
-      <button id="btn-toggle-info" class="btn btn-icon btn-toggle" title="收起/展开信息栏" data-open="▶" data-collapsed="◀">▶</button>
-      <span class="app-title">MMD 模型预览器</span>
-      <button id="btn-open-model" class="btn btn-primary" title="选择模型/压缩包文件">📂 选择模型…</button>
-      <button id="btn-open-archive" class="btn" title="导入压缩包并自动解压">🗜️ 导入压缩包…</button>
-      <button id="btn-choose-dir" class="btn" title="浏览目录">📁 浏览目录…</button>
-      <button id="btn-set-root" class="btn" title="自定义默认根目录（保存后自动刷新各库与缓存扫描）">📌 设置根目录…</button>
-      <button id="btn-refresh" class="btn" title="刷新当前目录">刷新</button>
-      <label class="switch toolbar-switch" title="自动识别模型与动作资源并缓存到本地">
-        <input id="tgl-auto-cache" type="checkbox">
-        <span>⚙ 自动识别缓存</span>
-      </label>
-      <span id="root-path" class="root-path"></span>
+      <div class="tb-group tb-brand">
+        <button id="btn-toggle-sidebar" class="btn btn-icon btn-toggle" title="收起/展开左侧栏" data-open="◀" data-collapsed="▶">◀</button>
+        <span class="app-title">MMD 模型预览器</span>
+      </div>
+      <div class="tb-group tb-import">
+        <button id="btn-open-model" class="btn btn-primary" title="选择模型/压缩包文件">📂 添加模型</button>
+        <button id="btn-open-archive" class="btn" title="导入压缩包并自动解压">🗜️ 导入压缩包</button>
+        <button id="btn-choose-dir" class="btn" title="浏览目录">📁 浏览目录</button>
+        <button id="btn-set-root" class="btn" title="自定义默认根目录（保存后自动刷新各库与缓存扫描）">📌 根目录</button>
+        <button id="btn-refresh" class="btn" title="刷新当前目录">刷新</button>
+      </div>
       <span class="spacer"></span>
-      <button id="btn-move-mode" class="btn" title="移动模式：开启后在预览区按住左键拖动模型到任意位置">🖐 移动模式</button>
-      <button id="btn-clear-scene" class="btn" title="移除场景中已加入的场景模型（保留当前角色模型）">🧹 清空场景</button>
-      <button id="btn-reset-view" class="btn" title="重置视角">重置视角</button>
-      <button id="btn-screenshot" class="btn btn-primary" title="导出当前视角为 PNG">截图导出</button>
+      <div class="tb-group tb-view">
+        <button id="btn-move-mode" class="btn" title="移动模式：开启后在预览区按住左键拖动模型到任意位置">🖐 移动模式</button>
+        <button id="btn-clear-scene" class="btn" title="移除场景中已加入的场景模型（保留当前角色模型）">🧹 清空场景</button>
+        <button id="btn-reset-view" class="btn" title="重置视角">重置视角</button>
+        <button id="btn-screenshot" class="btn btn-primary" title="导出当前视角为 PNG">📸 截图导出</button>
+      </div>
+      <div class="tb-group tb-misc">
+        <label class="switch toolbar-switch" title="自动识别模型与动作资源并缓存到本地">
+          <input id="tgl-auto-cache" type="checkbox">
+          <span>自动缓存</span>
+        </label>
+        <span id="root-path" class="root-path"></span>
+        <button id="btn-toggle-info" class="btn btn-icon btn-toggle" title="收起/展开信息栏" data-open="▶" data-collapsed="◀">▶</button>
+      </div>
     </header>
 
     <div id="main">
@@ -37,32 +45,32 @@
       <aside id="sidebar">
         <!-- 库入口卡片 -->
         <div class="library-cards">
-          <div class="lib-card active" id="lib-models" data-tab="models">
+          <div class="lib-card active" id="lib-models" data-tab="models" title="模型库">
             <div class="lc-icon">🧊</div>
-            <div class="lc-title">模型库</div>
+            <div class="lc-title">模型</div>
             <div class="lc-count" id="lib-models-count">—</div>
           </div>
-          <div class="lib-card" id="lib-motions" data-tab="motions">
+          <div class="lib-card" id="lib-motions" data-tab="motions" title="动作库">
             <div class="lc-icon">🎬</div>
-            <div class="lc-title">动作库</div>
+            <div class="lc-title">动作</div>
             <div class="lc-count" id="lib-motions-count">—</div>
           </div>
-          <div class="lib-card" id="lib-scenes" data-tab="scenes">
+          <div class="lib-card" id="lib-scenes" data-tab="scenes" title="场景">
             <div class="lc-icon">🌆</div>
             <div class="lc-title">场景</div>
             <div class="lc-count" id="lib-scenes-count">—</div>
           </div>
-          <div class="lib-card" id="lib-cache" data-tab="cache">
+          <div class="lib-card" id="lib-cache" data-tab="cache" title="缓存资源">
             <div class="lc-icon">💾</div>
-            <div class="lc-title">缓存资源</div>
+            <div class="lc-title">缓存</div>
             <div class="lc-count" id="lib-cache-count">—</div>
           </div>
-          <div class="lib-card" id="lib-compose" data-tab="compose">
+          <div class="lib-card" id="lib-compose" data-tab="compose" title="组合编排">
             <div class="lc-icon">🧩</div>
             <div class="lc-title">组合</div>
             <div class="lc-count" id="lib-compose-count">—</div>
           </div>
-          <div class="lib-card" id="lib-recent" data-tab="recent">
+          <div class="lib-card" id="lib-recent" data-tab="recent" title="最近加载">
             <div class="lc-icon">🕘</div>
             <div class="lc-title">最近</div>
             <div class="lc-count" id="lib-recent-count">—</div>
