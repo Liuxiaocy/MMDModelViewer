@@ -17,6 +17,7 @@ import { TDSLoader } from '../node_modules/three/examples/jsm/loaders/TDSLoader.
 import { STLLoader } from '../node_modules/three/examples/jsm/loaders/STLLoader.js';
 import { PLYLoader } from '../node_modules/three/examples/jsm/loaders/PLYLoader.js';
 import { ColladaLoader } from '../node_modules/three/examples/jsm/loaders/ColladaLoader.js';
+import { DDSLoader } from '../node_modules/three/examples/jsm/loaders/DDSLoader.js';
 
 const api = window.mmdAPI;
 const MOTION_EXTS_RE = /\.(vmd|vpd)$/i;
@@ -45,6 +46,8 @@ const btnUp = $('btn-up');
 const btnHome = $('btn-home');
 const motionListEl = $('motion-list');
 const motionFilterEl = $('motion-filter');
+const modListEl = $('mod-list');
+const modFilterEl = $('mod-filter');
 const recentListEl = $('recent-list');
 const libCards = document.querySelectorAll('.lib-card');
 const sideViews = document.querySelectorAll('.side-view');
@@ -97,6 +100,9 @@ let currentAnimating = false;  // 表示当前是否有动作在驱动（用于�
 let vmdFiles = [];
 let motionRootItems = [];
 let motionFilterKw = '';
+let modRootItems = [];
+let modFilterKw = '';
+let modArchivesCache = null; // mod 压缩包缓存（含 .ini 的），null 表示未扫描
 let recentItems = [];
 
 // Win10 扁平文件树辅助：dir 行的 path -> Set(所有后代 rows 的引用)
@@ -795,6 +801,11 @@ function switchTab(tab, updateHistory = true) {
     } else {
       sceneTreeEl.innerHTML = '<div class="placeholder">未找到场景目录（' + (defaultRootPath || '') + '\\场景）</div>';
     }
+  } else if (tab === 'mods') {
+    renderModList();
+    renderBreadcrumb('', []);
+    breadcrumbEl.innerHTML = '<span class="crumb placeholder">🎮 Mod 库（选择 Mod 装载到当前模型）</span>';
+    updateNavButtons();
   } else if (tab === 'recent') {
     renderRecentList();
     renderBreadcrumb('', []);
@@ -1421,6 +1432,8 @@ function updateLibCounts() {
   // 文件树只统计文件系统中的资源；已缓存资源统一显示在「缓存资源」面板
   $('lib-models-count').textContent = (currentRoot ? countModels(currentRoot) : 0) + ' 项';
   $('lib-motions-count').textContent = motionRootItems.length + ' 项';
+  const lmc = $('lib-mods-count');
+  if (lmc) lmc.textContent = (modArchivesCache ? modArchivesCache.length : 0) + ' 项';
   $('lib-recent-count').textContent = recentItems.length + ' 项';
   const sce = $('lib-scenes-count');
   if (sce) sce.textContent = (sceneRoot ? countModels(sceneRoot) : 0) + ' 项';
@@ -1990,6 +2003,222 @@ async function loadModel(node, opts = {}) {
     console.error(err);
   }
 }
+
+// ============ XXMI/3DMigoto Mod 加载 ============
+// 解析 .ini + .ib（uint32 索引） + .buf（Position/Texcoord 顶点缓冲） + .dds 贴图
+// 构建 Three.js BufferGeometry 并显示预览（静态 T-pose，无骨骼/物理）
+const ddsLoader = new DDSLoader();
+
+// 自定义 DDS BC7 加载器：DDSLoader 仅支持 BC1/3/5/6H，不认 BC7（DXGI_FORMAT_BC7_UNORM=99）
+// 大部分原神 mod 贴图使用 BC7 压缩。现代桌面 GPU 支持 EXT_texture_compression_bptc，
+// 可直接上传压缩块数据由 GPU 解压，无需 JS 端解码。
+async function loadDDSTextureBC7(url) {
+  const buf = await (await fetch(url)).arrayBuffer();
+  const dv = new DataView(buf);
+  // 检查 DDS 魔数
+  if (buf.byteLength < 148 || dv.getUint8(0) !== 0x44 || dv.getUint8(1) !== 0x44 || dv.getUint8(2) !== 0x53 || dv.getUint8(3) !== 0x20)
+    return null;
+  const width = dv.getUint32(16, true);
+  const height = dv.getUint32(12, true);
+  // fourCC at offset 84
+  const fourCC = String.fromCharCode(dv.getUint8(84), dv.getUint8(85), dv.getUint8(86), dv.getUint8(87));
+  if (fourCC !== 'DX10') {
+    // 非 DX10 格式，退回 DDSLoader（支持 DXT1/3/5）
+    return null;
+  }
+  const dxgiFormat = dv.getUint32(128, true);
+  // 95=BC6H_UF16, 96=BC6H_SF16, 99=BC7_UNORM
+  if (dxgiFormat !== 99 && dxgiFormat !== 95 && dxgiFormat !== 96) return null;
+
+  // 检查 WebGL BPTC 扩展
+  const gl = renderer.getContext();
+  const ext = gl.getExtension('EXT_texture_compression_bptc') || gl.getExtension('WEBGL_compressed_texture_bptc');
+  if (!ext) {
+    console.warn('GPU 不支持 BPTC 纹理压缩，Mod 贴图将无法显示');
+    return null;
+  }
+
+  // 提取压缩块数据（跳过 128B 标准 DDS 头 + 20B DX10 头 = 148B）
+  const blockData = new Uint8Array(buf, 148).slice(); // copy 成独立 ArrayBuffer，避免 view 偏移问题
+  const COMPRESSED_RGBA_BPTC_UNORM_EXT = 0x8E8C;
+  const mipmap = { data: blockData, width, height };
+  const texture = new THREE.CompressedTexture([mipmap], width, height, COMPRESSED_RGBA_BPTC_UNORM_EXT);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  // HACK: 强制 useTexStorage=false，走 compressedTexImage2D 路径（非 SubImage）
+  // useTexStorage + texStorage2D + compressedTexSubImage2D 路径在 BC7 上可能静默失败（数据未真正上传）
+  texture.isVideoTexture = true;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// PNG 纹理加载器（用于加载 CPU 解压后的 BC7 DDS → PNG）
+const pngLoader = new THREE.TextureLoader();
+
+// DDS 贴图加载：优先用 main.js CPU 解压 BC7 → PNG（绕过软件渲染器 BC7 硬解 bug），
+// 失败则退回 DDSLoader（支持 DXT1/3/5 + 未压缩 RGBA）
+async function loadDDSTexture(ddsPath) {
+  // 1) CPU 解压 BC7 → PNG（主路径，软件渲染器 BC7 硬解不工作）
+  try {
+    const r = await api.decodeDdsToPng(ddsPath);
+    if (r.ok && r.pngPath) {
+      // 用 mmd:// 协议加载 PNG（CSP 不允许 file://，mmd:// 已注册）
+      const pngUrl = api.mmdUrl(r.pngPath);
+      const tex = await new Promise((resolve, reject) => {
+        pngLoader.load(pngUrl, resolve, undefined, reject);
+      });
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      tex.generateMipmaps = true;
+      tex.needsUpdate = true;
+      return tex;
+    }
+    console.warn('[Mod] decodeDdsToPng 失败，退回 DDSLoader:', r.error);
+  } catch (err) { console.warn('[Mod] decodeDdsToPng 异常，退回 DDSLoader:', err); }
+
+  // 2) 退回 DDSLoader（DXT1/3/5 + 未压缩 RGBA，走 mmd:// 协议）
+  const url = api.mmdUrl(ddsPath);
+  return new Promise((resolve, reject) => {
+    ddsLoader.load(url, resolve, undefined, reject);
+  });
+}
+
+async function loadModModel(archivePath) {
+  setStatus('正在加载 Mod …');
+  clearModel();
+  currentModelPath = archivePath;
+
+  const result = await api.loadModArchive(archivePath);
+  if (!result.ok) {
+    setStatus('Mod 加载失败：' + result.error, 'error');
+    return;
+  }
+
+  const { modName, parts } = result.data;
+  const group = new THREE.Group();
+  group.name = modName || 'Mod';
+  group.userData.path = archivePath;
+  group.userData.isMod = true;
+
+  let totalVerts = 0, totalFaces = 0, totalTex = 0;
+
+  for (const part of parts) {
+    try {
+      // 通过 mmd:// 协议 fetch 二进制缓冲数据
+      const [posBuf, tcBuf, ibBuf] = await Promise.all([
+        fetch(api.mmdUrl(part.positionFile)).then(r => r.arrayBuffer()),
+        fetch(api.mmdUrl(part.texcoordFile)).then(r => r.arrayBuffer()),
+        fetch(api.mmdUrl(part.indexFile)).then(r => r.arrayBuffer()),
+      ]);
+
+      const posStride = part.positionStride;
+      const tcStride = part.texcoordStride;
+      const vertCount = Math.floor(posBuf.byteLength / posStride);
+
+      // Position: float3 at offset 0; Normal: float3 at offset 12
+      const positions = new Float32Array(vertCount * 3);
+      const normals = new Float32Array(vertCount * 3);
+      const posView = new DataView(posBuf);
+      for (let i = 0; i < vertCount; i++) {
+        const off = i * posStride;
+        positions[i*3]   = posView.getFloat32(off, true);
+        positions[i*3+1] = posView.getFloat32(off+4, true);
+        positions[i*3+2] = posView.getFloat32(off+8, true);
+        if (off + 24 <= posBuf.byteLength) {
+          normals[i*3]   = posView.getFloat32(off+12, true);
+          normals[i*3+1] = posView.getFloat32(off+16, true);
+          normals[i*3+2] = posView.getFloat32(off+20, true);
+        }
+      }
+
+      // Texcoord: uint32 metadata(4B) + float32 U(4B) + float32 V(4B) + padding(8B) + 第二组UV(可选)
+      // 3DMigoto 标准 UV 顺序为 (U, V)：offset 4 = U, offset 8 = V
+      // PNG 纹理经 TextureLoader 加载（flipY=true），V=0 在底部；游戏 UV（D3D）V=0 在顶部 → 需翻转 V
+      const uvs = new Float32Array(vertCount * 2);
+      const tcView = new DataView(tcBuf);
+      for (let i = 0; i < vertCount; i++) {
+        const off = i * tcStride;
+        uvs[i*2]   = tcView.getFloat32(off+4, true);       // U
+        uvs[i*2+1] = 1.0 - tcView.getFloat32(off+8, true); // V（翻转：D3D 顶部 origin → WebGL 底部 origin）
+      }
+
+      // Index buffer: uint32 indices
+      const idxCount = Math.floor(ibBuf.byteLength / 4);
+      const indices = new Uint32Array(ibBuf, 0, idxCount);
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+      geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+      geo.setIndex(new THREE.BufferAttribute(indices, 1));
+      geo.computeBoundingBox();
+      geo.computeBoundingSphere();
+
+      totalVerts += vertCount;
+      totalFaces += Math.floor(idxCount / 3);
+
+      // DDS 贴图：CPU 解压 BC7 → PNG（绕过软件渲染器 BC7 硬解 bug）
+      let material;
+      if (part.diffuseTexture) {
+        totalTex++;
+        const texture = await loadDDSTexture(part.diffuseTexture);
+        if (texture) {
+          // MeshLambertMaterial 漫反射：有基础光影且颜色比 PBR 更接近纹理原色
+          // transparent=false：游戏 Diffuse 的 alpha 通道不是透明度（多为 specular mask），强制不透明
+          material = new THREE.MeshLambertMaterial({
+            map: texture,
+            side: THREE.DoubleSide,
+            transparent: false,
+          });
+        } else {
+          // 贴图加载失败：品红色标识
+          material = new THREE.MeshBasicMaterial({
+            color: 0xFF00FF,
+            side: THREE.DoubleSide,
+          });
+        }
+      } else {
+        material = new THREE.MeshLambertMaterial({
+          color: 0x888888,
+          side: THREE.DoubleSide,
+        });
+      }
+
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.name = part.name;
+      group.add(mesh);
+    } catch (err) {
+      console.error('Mod 部件加载失败:', part.name, err);
+    }
+  }
+
+  if (group.children.length === 0) {
+    setStatus('Mod 加载失败：没有成功构建任何网格部件', 'error');
+    return;
+  }
+
+  // 居中并落地
+  const box = new THREE.Box3().setFromObject(group);
+  const center = box.getCenter(new THREE.Vector3());
+  group.position.x -= center.x;
+  group.position.z -= center.z;
+  group.position.y -= box.min.y;
+  group.updateMatrixWorld(true);
+
+  scene.add(group);
+  currentModel = group;
+  currentMesh = group;
+
+  refreshOutlineSelection();
+  frameModel(group);
+  showModelInfo(group, { name: modName + ' (Mod)', path: archivePath });
+
+  setStatus(`已加载 Mod：${modName}（${parts.length} 部件 · ${totalVerts} 顶点 · ${Math.floor(totalFaces)} 面 · ${totalTex} 贴图）`, 'info');
+}
 // 按格式解析主流通用 3D 文件为模型根对象（不加入场景）：FBX / OBJ(+MTL) / GLB / GLTF / 3DS / STL / PLY / DAE
 function parseGenericRoot(url, name) {
   const ext = (name || '').split('.').pop().toLowerCase();
@@ -2310,6 +2539,69 @@ function renderMotionList() {
   });
 }
 
+// ---------- Mod 库列表渲染 ----------
+function collectArchivesInTree(rootNode) {
+  const out = [];
+  (function walk(n) {
+    if (!n) return;
+    if (n.type === 'archive' || ARCHIVE_RE.test(n.name || '')) out.push(n);
+    (n.children || []).forEach(walk);
+  })(rootNode);
+  return out;
+}
+
+async function renderModList() {
+  if (!currentRoot) {
+    modListEl.innerHTML = '<div class="placeholder">请先设置根目录</div>';
+    return;
+  }
+  // 首次或根目录变化时扫描 mod 压缩包（含 .ini 的），排除非 mod 文件
+  if (!modArchivesCache) {
+    modListEl.innerHTML = '<div class="placeholder">扫描 Mod 压缩包中…</div>';
+    const rootPath = (currentRoot && currentRoot.path) ? currentRoot.path : '';
+    const r = await api.scanModArchives(rootPath);
+    modArchivesCache = (r && r.ok && Array.isArray(r.data)) ? r.data : [];
+  }
+  modRootItems = modArchivesCache;
+  const kw = modFilterKw.trim().toLowerCase();
+  const items = modArchivesCache.filter((n) => !kw || (n.name || '').toLowerCase().includes(kw));
+  if (!items.length) {
+    modListEl.innerHTML = `<div class="placeholder">${modFilterKw ? '没有匹配的 Mod 文件' : '根目录下没有 Mod 压缩包（需含 .ini 描述符）'}</div>`;
+    return;
+  }
+  const hasModel = !!(currentModel && currentMesh);
+  let html = '';
+  if (hasModel) {
+    html += `<div class="placeholder" style="padding:6px 8px">当前模型：${escapeHtml(currentModel.name || '')}</div>`;
+  } else {
+    html += `<div class="placeholder" style="padding:6px 8px">💡 建议先加载模型，再选择 Mod 装载</div>`;
+  }
+  modListEl.innerHTML = html;
+  items.forEach((n) => {
+    const el = document.createElement('div');
+    el.className = 'motion-item';
+    el.dataset.path = (n.path || '').replace(/\\/g, '/');
+    el.innerHTML = `
+      <div class="mi-icon">📦</div>
+      <div class="mi-body">
+        <div class="mi-name">${escapeHtml(n.name)}</div>
+        <div class="mi-meta">
+          <span>${fmtSize(n.size)}</span>
+          <span class="chip">Mod 压缩包</span>
+        </div>
+      </div>`;
+    el.addEventListener('click', () => {
+      document.querySelectorAll('.motion-item.selected').forEach((x) => x.classList.remove('selected'));
+      el.classList.add('selected');
+      loadModModel(n.path);
+    });
+    modListEl.appendChild(el);
+  });
+  // 更新 Mod 库计数
+  const lmc = $('lib-mods-count');
+  if (lmc) lmc.textContent = modArchivesCache.length + ' 项';
+}
+
 // ---------- 渲染循环 ----------
 const clock = new THREE.Clock();
 function animate() {
@@ -2512,6 +2804,15 @@ canvas.addEventListener('pointercancel', () => {
 // ---------- 工具栏事件 ----------
 $('btn-open-model').addEventListener('click', handleOpenModelDialog);
 $('btn-open-archive').addEventListener('click', handleOpenArchiveDialog);
+$('btn-load-mod').addEventListener('click', async () => {
+  const result = await api.showOpenDialog({
+    title: '选择 Mod 压缩包',
+    filters: [{ name: 'Mod 压缩包', extensions: ['zip', '7z', 'rar'] }],
+    properties: ['openFile'],
+  });
+  if (!result || !result.ok || !result.data || !result.data[0]) return;
+  await loadModModel(result.data[0]);
+});
 $('btn-reset-view').addEventListener('click', () => {
   // 计算场景中最大包围盒半径：存在大面积场景模型时，默认视角对准网格中心（贴地内部视角）；
   // 否则按「角色+全部场景模型」整体取景。
@@ -2562,6 +2863,8 @@ $('btn-set-root').addEventListener('click', async () => {
   defaultRootPath = res.data;
   motionRootPath = null;
   sceneRootPath = null;
+  modRootItems = [];
+  modArchivesCache = null; // 根目录变化，重置 mod 缓存，让 Mod 库重新扫描
   rootPathEl.textContent = defaultRootPath;
   navStack.back = [{ path: defaultRootPath, tab: 'models' }];
   navStack.forward = [];
@@ -3450,6 +3753,7 @@ initCacheTabModule();
 
 // 动作搜索
 motionFilterEl.addEventListener('input', (e) => { motionFilterKw = e.target.value; renderMotionList(); });
+modFilterEl.addEventListener('input', (e) => { modFilterKw = e.target.value; renderModList(); });
 
 // 预览卡关闭
 pcClose.addEventListener('click', () => { delete previewCardEl.dataset.pinned; previewCardEl.classList.add('hidden'); });
@@ -3905,6 +4209,13 @@ window.__mmdTest = {
   loadAsCurrent: async (path, name) => {
     await loadModel({ path, name: name || '角色', size: 0 }, {});
     return { ok: true, current: currentModel && currentModel.name };
+  },
+  loadMod: async (archivePath) => {
+    await loadModModel(archivePath);
+    if (!currentModel) return { ok: false };
+    const box = new THREE.Box3().setFromObject(currentModel);
+    const sz = box.getSize(new THREE.Vector3());
+    return { ok: true, name: currentModel.name, size: [+sz.x.toFixed(2), +sz.y.toFixed(2), +sz.z.toFixed(2)] };
   },
   // 测试辅助：模块作用域访问器（页面 eval 无法直接引用模块变量）
   current: () => currentMesh,

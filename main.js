@@ -352,6 +352,46 @@ function registerIpc() {
     }
   });
 
+  // 扫描根目录下所有"Mod 压缩包"（含 .ini 描述符的 XXMI/3DMigoto Mod）
+  // 排除非 mod 文件（如场景压缩包、模型压缩包等）
+  ipcMain.handle('scan-mod-archives', async (_evt, rootPath) => {
+    try {
+      const target = rootPath || effectiveRoot();
+      if (!fs.existsSync(target)) return { ok: false, error: '目录不存在' };
+
+      // 递归收集所有压缩包
+      const archives = [];
+      (function walk(dir) {
+        let items;
+        try { items = fs.readdirSync(dir, { withFileTypes: true }); }
+        catch (_) { return; }
+        for (const it of items) {
+          if (it.name.startsWith('.')) continue;
+          const full = path.join(dir, it.name);
+          if (it.isDirectory()) walk(full);
+          else if (isArchiveFile(it.name)) archives.push({ path: full, name: it.name });
+        }
+      })(target);
+
+      // 检查每个压缩包是否含 .ini（XXMI Mod 标志）
+      const mods = [];
+      for (const a of archives) {
+        try {
+          const entries = await listArchiveEntries(a.path);
+          const hasIni = entries.some(e => e.name.toLowerCase().endsWith('.ini'));
+          if (hasIni) {
+            let size = null;
+            try { size = fs.statSync(a.path).size; } catch (_) { /* noop */ }
+            mods.push({ path: a.path, name: a.name, size });
+          }
+        } catch (_) { /* 跳过无法读取的压缩包 */ }
+      }
+      return { ok: true, data: mods };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message || err) };
+    }
+  });
+
   ipcMain.handle('extract-archive', async (_evt, archivePath) => {
     try {
       const dest = await extractArchive(archivePath);
@@ -571,6 +611,191 @@ function registerIpc() {
       }
 
       return { ok: false, error: '当前格式暂不支持列表预览：' + ext };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message || err) };
+    }
+  });
+
+  // ---------- 加载 XXMI/3DMigoto Mod 压缩包 ----------
+  // 解压 zip → 找 .ini → 解析部件 → 返回二进制文件路径与元数据
+  // 渲染进程通过 mmd:// 协议 fetch 各 .buf/.ib/.dds 并自行解析为 Three.js 几何体
+  ipcMain.handle('load-mod-archive', async (_evt, archivePath) => {
+    try {
+      if (!fs.existsSync(archivePath)) return { ok: false, error: '文件不存在' };
+      const ext = path.extname(archivePath).toLowerCase();
+      if (!ARCHIVE_EXTS.has(ext)) return { ok: false, error: '不支持的压缩包格式：' + ext };
+
+      const dest = await extractArchive(archivePath);
+
+      // 查找 .ini 文件（XXMI 导出的 mod 描述符）
+      function findIni(dir) {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (e.isFile() && e.name.toLowerCase().endsWith('.ini')) return path.join(dir, e.name);
+          if (e.isDirectory()) { const r = findIni(path.join(dir, e.name)); if (r) return r; }
+        }
+        return null;
+      }
+      const iniFile = findIni(dest);
+      if (!iniFile) return { ok: false, error: '压缩包内未找到 .ini 描述符（非 XXMI Mod）' };
+      const iniText = fs.readFileSync(iniFile, 'utf-8');
+
+      // --- 简易 INI 解析 ---
+      const sections = {};
+      let curSec = null;
+      for (const line of iniText.split(/\r?\n/)) {
+        const secMatch = line.match(/^\s*\[([^\]]+)\]\s*$/);
+        if (secMatch) { curSec = secMatch[1].trim(); sections[curSec] = {}; continue; }
+        if (!curSec) continue;
+        const kvMatch = line.match(/^\s*(\S+)\s*=\s*(.*)$/);
+        if (kvMatch) {
+          const k = kvMatch[1].trim();
+          const v = kvMatch[2].trim();
+          // 去掉行内注释
+          const semi = v.indexOf(';');
+          if (semi >= 0) sections[curSec][k] = v.slice(0, semi).trim();
+          else sections[curSec][k] = v;
+        }
+      }
+
+      // --- 收集 Resource 定义 ---
+      const resources = {};
+      for (const [secName, kv] of Object.entries(sections)) {
+        if (!kv.filename) continue;
+        resources[secName] = {
+          filename: kv.filename,
+          stride: kv.stride ? parseInt(kv.stride) : 0,
+          type: kv.type || 'Texture',
+          format: kv.format || null,
+        };
+      }
+
+      // --- 收集 draw call（含 ib= 和 drawindexed= 的 TextureOverride 段） ---
+      const positionRes = Object.keys(resources).filter(n => n.endsWith('Position'));
+      const texcoordRes = Object.keys(resources).filter(n => n.endsWith('Texcoord'));
+      const parts = [];
+
+      for (const [secName, kv] of Object.entries(sections)) {
+        if (!secName.startsWith('TextureOverride')) continue;
+        if (!kv.ib || !kv.drawindexed) continue;
+        if (kv.ib === 'null') continue;
+
+        const ibRes = resources[kv.ib];
+        if (!ibRes || !ibRes.filename) continue;
+
+        // 解析 drawindexed = indexCount, startVertex, startIndex
+        const diParts = kv.drawindexed.split(',').map(s => parseInt(s.trim()) || 0);
+        const indexCount = diParts[0];
+        if (indexCount <= 0) continue;
+
+        // 按 section 名最长前缀匹配 Position / Texcoord 资源
+        // section 名 = TextureOverrideColumbinaEyeHead，resource 名 = ResourceColumbinaEyePosition
+        // 双方去掉各自前缀（TextureOverride / Resource）后做 startsWith 匹配
+        const matchPrefix = (resList) => {
+          const secBase = secName.replace(/^TextureOverride/, '');
+          const candidates = resList
+            .map(n => ({ res: n, base: n.replace(/^Resource/, '').replace(/Position$|Texcoord$/, ''), len: 0 }))
+            .map(c => { c.len = c.base.length; return c; })
+            .filter(c => secBase.startsWith(c.base))
+            .sort((a, b) => b.len - a.len);
+          return candidates.length > 0 ? resources[candidates[0].res] : null;
+        };
+
+        const posMatch = matchPrefix(positionRes);
+        const tcMatch = matchPrefix(texcoordRes);
+        if (!posMatch || !tcMatch) continue;
+
+        // 查找 diffuse 贴图：优先 ps-t1（含 Diffuse），其次 ps-t0
+        let diffuseRes = null;
+        for (const key of ['ps-t1', 'ps-t0']) {
+          if (kv[key] && resources[kv[key]] && resources[kv[key]].filename) {
+            diffuseRes = resources[kv[key]];
+            break;
+          }
+        }
+
+        parts.push({
+          name: secName,
+          positionFile: path.join(dest, posMatch.filename),
+          positionStride: posMatch.stride,
+          texcoordFile: path.join(dest, tcMatch.filename),
+          texcoordStride: tcMatch.stride,
+          indexFile: path.join(dest, ibRes.filename),
+          indexCount,
+          diffuseTexture: diffuseRes ? path.join(dest, diffuseRes.filename) : null,
+        });
+      }
+
+      if (parts.length === 0) return { ok: false, error: '未在 .ini 中找到有效的网格部件（含 ib + drawindexed 的段）' };
+
+      const modName = path.basename(iniFile, '.ini');
+      return { ok: true, data: { modName, modDir: dest, parts } };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message || err) };
+    }
+  });
+
+  // ---------- BC7 DDS -> PNG 解码（CPU 解压，绕过软件渲染器 BC7 硬解 bug） ----------
+  // 返回 { ok, pngPath, url }，pngPath 为本地文件绝对路径，url 为可直接 fetch 的 file:// URL
+  ipcMain.handle('decode-dds-to-png', async (_evt, ddsPath) => {
+    try {
+      if (!ddsPath || !fs.existsSync(ddsPath)) return { ok: false, error: 'DDS 文件不存在: ' + ddsPath };
+
+      // 缓存目录：userData/dds-png-cache
+      const cacheDir = path.join(app.getPath('userData'), 'dds-png-cache');
+      await fsp.mkdir(cacheDir, { recursive: true });
+      // 用 DDS 内容 hash 命名，避免不同 Mod 同名 DDS 冲突
+      const stat = await fsp.stat(ddsPath);
+      const key = path.basename(ddsPath, '.dds') + '_' + stat.size + '_' + Math.floor(stat.mtimeMs);
+      const pngPath = path.join(cacheDir, key + '.png');
+
+      // 已缓存且比 DDS 新，直接复用
+      if (fs.existsSync(pngPath)) {
+        const pngMtime = (await fsp.stat(pngPath)).mtimeMs;
+        if (pngMtime >= stat.mtimeMs) {
+          return { ok: true, pngPath, url: pathToFileURL(pngPath).href };
+        }
+      }
+
+      // Python 可执行文件：优先用户安装路径，其次 PATH
+      const pyCandidates = [
+        'D:\\Python312\\python.exe',
+        'C:\\Python312\\python.exe',
+        'python',
+      ];
+      let pyExe = null;
+      for (const c of pyCandidates) {
+        try {
+          if (c.includes(':')) {
+            // 绝对路径，直接检查
+            if (fs.existsSync(c)) { pyExe = c; break; }
+          } else {
+            // PATH 中的命令，用 -c 测试
+            await new Promise((resolve, reject) => {
+              execFile(c, ['-c', 'import sys'], { windowsHide: true }, (e) => e ? reject(e) : resolve());
+            });
+            pyExe = c; break;
+          }
+        } catch (_) { /* 继续尝试下一个 */ }
+      }
+      if (!pyExe) return { ok: false, error: '未找到 Python 可执行文件（请安装 Python 3 到 D:\\Python312 或加入 PATH）' };
+
+      // texture2ddecoder 库目录：临时 pylibs
+      const pyLibs = path.join(os.tmpdir(), 'pylibs');
+      const script = path.join(__dirname, 'scripts', 'decode_dds.py');
+      if (!fs.existsSync(script)) return { ok: false, error: '解码脚本不存在: ' + script };
+
+      const env = { ...process.env, PYTHONPATH: pyLibs };
+
+      await new Promise((resolve, reject) => {
+        execFile(pyExe, [script, ddsPath, pngPath], { env, windowsHide: true }, (err, stdout, stderr) => {
+          if (err) {
+            reject(new Error((stderr || stdout || '').trim() + ' (' + String(err && err.message || err) + ')'));
+          } else resolve();
+        });
+      });
+
+      if (!fs.existsSync(pngPath)) return { ok: false, error: 'PNG 生成失败（解码脚本未输出文件）' };
+      return { ok: true, pngPath, url: pathToFileURL(pngPath).href };
     } catch (err) {
       return { ok: false, error: String(err && err.message || err) };
     }

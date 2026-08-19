@@ -18,6 +18,7 @@
       <div class="tb-group tb-import">
         <button id="btn-open-model" class="btn btn-primary" title="选择模型/压缩包文件">📂 添加模型</button>
         <button id="btn-open-archive" class="btn" title="导入压缩包并自动解压">🗜️ 导入压缩包</button>
+        <button id="btn-load-mod" class="btn" title="加载 XXMI/3DMigoto Mod 压缩包（.zip 含 .ini）">🎮 加载 Mod</button>
         <button id="btn-choose-dir" class="btn" title="浏览目录">📁 浏览目录</button>
         <button id="btn-set-root" class="btn" title="自定义默认根目录（保存后自动刷新各库与缓存扫描）">📌 根目录</button>
         <button id="btn-refresh" class="btn" title="刷新当前目录">刷新</button>
@@ -59,6 +60,11 @@
             <div class="lc-icon">🌆</div>
             <div class="lc-title">场景</div>
             <div class="lc-count" id="lib-scenes-count">—</div>
+          </div>
+          <div class="lib-card" id="lib-mods" data-tab="mods" title="Mod 库">
+            <div class="lc-icon">🎮</div>
+            <div class="lc-title">Mod</div>
+            <div class="lc-count" id="lib-mods-count">—</div>
           </div>
           <div class="lib-card" id="lib-cache" data-tab="cache" title="缓存资源">
             <div class="lc-icon">💾</div>
@@ -108,6 +114,15 @@
           <div class="side-view hidden" data-view="scenes">
             <div class="panel-title-small">场景目录</div>
             <div id="scene-tree" class="scene-tree">
+              <div class="placeholder">扫描中…</div>
+            </div>
+          </div>
+          <div class="side-view hidden" data-view="mods">
+            <div class="panel-title-small">
+              Mod 库
+              <input id="mod-filter" class="filter-input" type="text" placeholder="搜索 Mod…" />
+            </div>
+            <div id="mod-list" class="motion-list">
               <div class="placeholder">扫描中…</div>
             </div>
           </div>

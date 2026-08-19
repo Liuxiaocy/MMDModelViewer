@@ -20,6 +20,12 @@ contextBridge.exposeInMainWorld('mmdAPI', {
   extractArchive: (archivePath) => ipcRenderer.invoke('extract-archive', archivePath),
   /** 不解压仅列出压缩包条目 */
   listArchiveContents: (archivePath) => ipcRenderer.invoke('list-archive-contents', archivePath),
+  /** 加载 XXMI/3DMigoto Mod 压缩包：解压 → 解析 .ini → 返回部件元数据 */
+  loadModArchive: (archivePath) => ipcRenderer.invoke('load-mod-archive', archivePath),
+  /** 扫描根目录下所有 Mod 压缩包（含 .ini 的），排除非 mod 文件 */
+  scanModArchives: (rootPath) => ipcRenderer.invoke('scan-mod-archives', rootPath),
+  /** BC7 DDS → PNG CPU 解码（绕过软件渲染器 BC7 硬解 bug），返回 { ok, pngPath, url } */
+  decodeDdsToPng: (ddsPath) => ipcRenderer.invoke('decode-dds-to-png', ddsPath),
   /** 弹出目录选择框 */
   chooseDir: () => ipcRenderer.invoke('choose-dir'),
   /** 原生文件选择对话框（选模型/压缩包/动作文件） */
