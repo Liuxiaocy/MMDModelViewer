@@ -9,8 +9,17 @@ const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const seven = require('7zip-min');
-const sevenBin = require('7zip-bin');
 const unrar = require('node-unrar-js');
+
+// 7za 可执行文件路径：使用随包分发的原始 7za（vendor/7za.exe，打包时 asarUnpack 到 asar.unpacked）。
+// 不能依赖 7zip-min 默认的 asar 路径改写（它按 process.argv[1] 是否含 "app.asar" 判断，
+// 而打包版 argv 里不含该串，会从 asar 内部 spawn 7za.exe 导致 ENOENT）；
+// 也不能用 node_modules/7zip-bin 下的 7za.exe（打包期为绕过 winCodeSign 符号链接权限被替换为
+// 容错 wrapper，会把真实 exit code 2 误判为成功，掩盖解压失败）。
+const SEVENZA_BIN = app.isPackaged
+  ? path.join(__dirname, 'vendor', '7za.exe').replace('app.asar', 'app.asar.unpacked')
+  : path.join(__dirname, 'vendor', '7za.exe');
+seven.config({ binaryPath: SEVENZA_BIN });
 
 // 软件安装目录：打包（安装/便携版）后为可执行文件所在目录（如 D:\Program Files\MMDModelViewer），
 // 开发模式为项目根目录；默认根目录与缓存目录均基于它派生
@@ -843,7 +852,7 @@ function registerIpc() {
   // 直接调用 7za（-sccUTF-8 强制 UTF-8 输出，解决 Windows 下中文条目名乱码）
   function list7zEntries(archivePath) {
     return new Promise((resolve) => {
-      execFile(sevenBin.path7za, ['l', '-slt', '-ba', '-sccUTF-8', archivePath],
+      execFile(SEVENZA_BIN, ['l', '-slt', '-ba', '-sccUTF-8', archivePath],
         { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
         (err, stdout) => {
           if (err) { console.error('[scan] 7za list failed:', archivePath, (err && err.message) || err); return resolve([]); }
