@@ -224,56 +224,126 @@ function fileKind(p) {
   return 'file';
 }
 
-// ---------- 压缩包解压到临时目录 ----------
-// 缓存：archivePath -> { dest, createAt }，避免重复解压
-const extractCache = new Map();
+// ---------- 压缩包解压目录：持久化缓存（跨程序启动复用，避免每次重解压） ----------
+// 之前用 os.tmpdir() + Date.now()，每次启动必重解压，关机或 tmp 清理后也会失效；
+// 现在放到 <userData>/Cache/extract/<sig>，sig 由 archivePath+size+mtimeMs 生成，
+// 源压缩包未修改时下次启动直接命中。手动「一键清空」会同时清理该目录。
+const extractCache = new Map();   // 运行期内存 map：archivePath -> { dest, createdAt }
+
+function _extractRoot() {
+  // userData 需 app.whenReady 之后才合法，这里用惰性函数即可（registerIpc 内 whenReady 后调用）
+  try { return path.join(app.getPath('userData'), 'Cache', 'extract'); }
+  catch (_) { return path.join(os.tmpdir(), 'mmdviewer'); }
+}
+function _extractSig(archivePath, stat) {
+  const size = String(stat && stat.size || 0);
+  const mtime = String(stat && stat.mtimeMs ? Math.floor(stat.mtimeMs) : 0);
+  return crypto.createHash('md5')
+    .update(String(archivePath || '') + '|' + size + '|' + mtime)
+    .digest('hex')
+    .slice(0, 20);
+}
+// 启动 / 解压前做一次 LRU：超过数量/容量阈值就删除最旧目录（避免持久化目录无限增长）
+const EXTRACT_MAX_ENTRIES = 64;
+const EXTRACT_MAX_BYTES  = 8 * 1024 * 1024 * 1024; // 8GB
+async function pruneExtractCacheIfNeeded() {
+  const root = _extractRoot();
+  if (!fs.existsSync(root)) return;
+  try {
+    const entries = [];
+    const names = await fsp.readdir(root);
+    for (const name of names) {
+      const full = path.join(root, name);
+      let st;
+      try { st = await fsp.stat(full); } catch (_) { continue; }
+      if (!st.isDirectory()) continue;
+      // 用目录 mtime 作为最近使用时间
+      entries.push({ name, full, ts: st.mtimeMs });
+    }
+    // 计算总大小（只看第一层目录下的文件数：极端情况下算总量太慢，退化为"条目数+粗略"。
+    // 为更准确，按目录数超阈值或总大小超上限才清。）
+    let totalBytes = 0;
+    for (const e of entries) {
+      try { totalBytes += await calcDirSize(e.full); } catch (_) {}
+    }
+    if (entries.length <= EXTRACT_MAX_ENTRIES && totalBytes <= EXTRACT_MAX_BYTES) return;
+    // 按 ts 升序（最旧先删），删到两条阈值都满足为止
+    entries.sort((a, b) => a.ts - b.ts);
+    for (const e of entries) {
+      const nLeft = entries.length - entries.indexOf(e);
+      if (nLeft <= EXTRACT_MAX_ENTRIES && totalBytes <= EXTRACT_MAX_BYTES) break;
+      try {
+        const freed = await calcDirSize(e.full);
+        await fsp.rm(e.full, { recursive: true, force: true, maxRetries: 2 });
+        totalBytes = Math.max(0, totalBytes - freed);
+      } catch (_) { /* noop */ }
+    }
+  } catch (e) {
+    console.warn('[cache] pruneExtractCacheIfNeeded failed:', e && e.message);
+  }
+}
 
 function extractArchive(archivePath) {
-  return new Promise((resolve, reject) => {
-    // 若已解压过且临时目录仍存在，直接复用
-    const cached = extractCache.get(archivePath);
-    if (cached && fs.existsSync(cached.dest)) {
-      resolve(cached.dest);
+  return new Promise(async (resolve, reject) => {
+    // 0) 运行期内存缓存命中（同进程内多次解压同一包）
+    const memCached = extractCache.get(archivePath);
+    if (memCached && fs.existsSync(memCached.dest)) {
+      resolve(memCached.dest);
       return;
     }
     extractCache.delete(archivePath);
 
-    const dest = path.join(
-      os.tmpdir(),
-      'mmdviewer',
-      crypto.createHash('md5').update(archivePath + Date.now()).digest('hex').slice(0, 12)
-    );
-    try {
-      fs.mkdirSync(dest, { recursive: true });
-    } catch (mkErr) {
-      reject(new Error('无法创建临时目录：' + (mkErr && mkErr.message || mkErr)));
-      return;
-    }
-
-    const ext = path.extname(archivePath).toLowerCase();
-
-    // 先校验归档文件可读性
+    // 1) 预读压缩包 stat：用于签名（判断文件是否修改）+ 校验
+    let stat;
     try {
       const fd = fs.openSync(archivePath, 'r');
       fs.closeSync(fd);
-      const st = fs.statSync(archivePath);
-      if (st.size === 0) {
-        reject(new Error('压缩包为空文件（0 字节）'));
-        return;
-      }
+      stat = fs.statSync(archivePath);
+      if (stat.size === 0) { reject(new Error('压缩包为空文件（0 字节）')); return; }
     } catch (accErr) {
       reject(new Error('压缩包不可访问：' + (accErr && accErr.message || accErr)));
       return;
     }
 
+    // 2) 持久化缓存命中（跨进程 / 跨启动）
+    const root = _extractRoot();
+    try { fs.mkdirSync(root, { recursive: true }); } catch (_) {}
+    const sig = _extractSig(archivePath, stat);
+    const dest = path.join(root, sig);
+    if (fs.existsSync(dest)) {
+      // 轻量完整性校验：目录非空且至少有 1 个文件
+      try {
+        const any = fs.readdirSync(dest, { withFileTypes: true }).some(e => e.isFile() || e.isDirectory());
+        if (any) {
+          try { fs.utimesSync(dest, Date.now() / 1000, Date.now() / 1000); } catch (_) {}
+          const entry = { dest, createdAt: Date.now() };
+          extractCache.set(archivePath, entry);
+          resolve(dest);
+          return;
+        }
+        // 空目录：清掉重新解压
+        try { fs.rmSync(dest, { recursive: true, force: true, maxRetries: 2 }); } catch (_) {}
+      } catch (_) { /* 校验读失败：重新解压 */ }
+    }
+    try {
+      fs.mkdirSync(dest, { recursive: true });
+    } catch (mkErr) {
+      reject(new Error('无法创建解压目录：' + (mkErr && mkErr.message || mkErr)));
+      return;
+    }
+
+    const ext = path.extname(archivePath).toLowerCase();
+
     const finish = (err) => {
       if (err) {
-        // 失败时清理残留下的目录，避免污染临时目录
+        // 失败时清理残留下的目录，避免留下半截目录下次误命中
         try { if (fs.existsSync(dest)) fs.rmSync(dest, { recursive: true, force: true, maxRetries: 2 }); } catch (_) { /* ignore */ }
         reject(new Error('解压失败：' + (err && err.message ? err.message : err)));
       } else {
         const entry = { dest, createdAt: Date.now() };
         extractCache.set(archivePath, entry);
+        // 异步 LRU 修剪（不阻塞当前解压）
+        pruneExtractCacheIfNeeded().catch(() => {});
         resolve(dest);
       }
     };
@@ -1026,6 +1096,20 @@ function registerIpc() {
       await fsp.mkdir(p.models, { recursive: true });
       await fsp.mkdir(p.motions, { recursive: true });
       await fsp.mkdir(p.thumbs, { recursive: true });
+      // 「一键清空」同时清理：解压缓存(extract/) + DDS→PNG 解码缓存
+      // （这两类属于"派生缓存"，不会删 models/motions 里的用户保留源，所以只有 all 才清）
+      try {
+        const extractDir = _extractRoot();
+        if (extractDir) await tryRm(extractDir);
+        await fsp.mkdir(extractDir, { recursive: true });
+      } catch (_) { /* noop */ }
+      try {
+        const ddsCacheDir = path.join(app.getPath('userData'), 'dds-png-cache');
+        await tryRm(ddsCacheDir);
+        await fsp.mkdir(ddsCacheDir, { recursive: true });
+      } catch (_) { /* noop */ }
+      // 内存里运行期解压引用也一起清（避免下次把已删除的 dest 又返回出去）
+      extractCache.clear();
     } else if (scope === 'models') {
       await tryRm(p.models); await fsp.mkdir(p.models, { recursive: true });
     } else if (scope === 'motions') {
@@ -1469,6 +1553,57 @@ function registerIpc() {
           try { await fsp.rm(tmpDirToClean, { recursive: true, force: true }); } catch (_) { /* noop */ }
           extractCache.delete(sourcePath);
         }
+      }
+    }
+
+    // 模型（文件来源）：整目录复制以携带 tex/aonmpb/spa/sph/toon 等相邻贴图资源，避免缓存后加载缺贴图
+    if (sourceType === 'file' && type === 'model') {
+      try {
+        const srcDir = path.dirname(sourcePath);
+        const srcBase = path.basename(sourcePath);
+        const dirName = `${safeBase}-${shortId}`;
+        const absDir = path.join(subDir, dirName);
+        const relDir = 'models/' + dirName;
+        try { await fsp.rm(absDir, { recursive: true, force: true }); } catch (_) { /* noop */ }
+        await fsp.mkdir(absDir, { recursive: true });
+        // 复制整个父目录资源
+        await fsp.cp(srcDir, absDir, { recursive: true, force: true, filter: (src, _dest) => {
+          try {
+            const st = fs.statSync(src);
+            if (st.isDirectory()) {
+              const b = path.basename(src).toLowerCase();
+              if (b === '__macosx' || b === '.git' || b === 'node_modules' || b.startsWith('.')) return false;
+              return true;
+            }
+            const ext = path.extname(src).toLowerCase();
+            if (ext === '.tmp' || ext === '.log' || ext === '.bak') return false;
+            return true;
+          } catch (_) { return false; }
+        }});
+        const relInSrcDir = srcBase; // always flat inside absDir
+        await backfillMissingTextures(absDir, relInSrcDir);
+        const cacheSize = await calcDirSize(absDir);
+        return {
+          succeeded: true,
+          skipped: false,
+          indexItem: {
+            id, type,
+            name: String(name || ''),
+            ext: String(ext || '').toLowerCase(),
+            sourcePath: String(sourcePath || ''),
+            sourceType: 'file',
+            archiveEntry: null,
+            srcDir: relDir,
+            cachePath: relDir + '/' + relInSrcDir.replace(/\\/g, '/'),
+            thumb: null,
+            cacheSize,
+            addedAt: Date.now(),
+            scene: isSceneSource,
+          },
+        };
+      } catch (e) {
+        console.error('[cache] copyOne(file-model whole) failed:', candidate, e);
+        return { succeeded: false, skipped: false, reason: (e && e.message) || String(e) };
       }
     }
 
@@ -2026,12 +2161,14 @@ async function runSmokeTest() {
 }
 
 // ---------- 启动 ----------
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   console.log('[main] ready, argv:', JSON.stringify(process.argv));
   // 首次运行确保默认根目录（<安装目录>/mods）存在，避免空目录报错
   try { fs.mkdirSync(DEFAULT_ROOT, { recursive: true }); } catch (_) { /* ignore */ }
   registerMmdProtocol();
   registerIpc();
+  // 启动后异步修剪一下压缩包解压的持久化缓存（不阻塞窗口创建）
+  pruneExtractCacheIfNeeded().catch(() => {});
 
   createWindow();
   if (process.argv.includes('--smoke-test')) {

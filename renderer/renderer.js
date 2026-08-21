@@ -8,7 +8,10 @@ import { RenderPass } from '../node_modules/three/examples/jsm/postprocessing/Re
 import { OutlinePass } from '../node_modules/three/examples/jsm/postprocessing/OutlinePass.js';
 import { ShaderPass } from '../node_modules/three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from '../node_modules/three/examples/jsm/postprocessing/OutputPass.js';
+import { UnrealBloomPass } from '../node_modules/three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { SAOPass } from '../node_modules/three/examples/jsm/postprocessing/SAOPass.js';
 import { FXAAShader } from '../node_modules/three/examples/jsm/shaders/FXAAShader.js';
+import { RGBELoader } from '../node_modules/three/examples/jsm/loaders/RGBELoader.js';
 import { GLTFLoader } from '../node_modules/three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from '../node_modules/three/examples/jsm/loaders/OBJLoader.js';
 import { MTLLoader } from '../node_modules/three/examples/jsm/loaders/MTLLoader.js';
@@ -115,6 +118,11 @@ const RECENT_MAX = 20;
 const PARAMS_KEY = 'mmdviewer_params_v1';
 const DEFAULT_PARAMS = {
   render: {
+    // ---------- 预设 ----------
+    renderPreset:     { t: 'select', v: 'default', label: '渲染预设', hint: '一键套用整组参数',
+                        options: [['default','🟰 默认预览'],['film','🎞 电影质感'],['natural','🌤 自然预览'],['studio','🎬 原色工作室'],['rembrandt','🖼 伦勃朗肖像'],['butterfly','🦋 蝴蝶光时尚'],['backlit','🌇 剪影背光'],['coldnight','🌙 冷夜氛围'],['neon','🌈 霓虹舞台'],['custom','🎛 自定义']] },
+    presetName:       { t: 'hidden', v: 'default', label: '当前布光预设' },
+    // ---------- 基础 ----------
     outlineEnabled:   { t: 'switch', v: true,  label: '轮廓描边',    hint: '稳定模型边缘抖动' },
     edgeStrength:     { t: 'range',  v: 0.9,   label: '边缘强度',    min: 0, max: 2, step: 0.01 },
     edgeThickness:    { t: 'range',  v: 0.003, label: '边缘粗细',    min: 0.0001, max: 0.01, step: 0.0001 },
@@ -122,19 +130,110 @@ const DEFAULT_PARAMS = {
     fxaaEnabled:      { t: 'switch', v: true,  label: 'FXAA 快速抗锯齿' },
     pixelRatioMax:    { t: 'range',  v: 2,     label: '像素比上限',  min: 1, max: 3, step: 0.25 },
     shadowEnabled:    { t: 'switch', v: true,  label: '阴影' },
-    shadowSoftness:   { t: 'range',  v: 1,     label: '阴影柔和度',  min: 0, max: 2, step: 0.05 },
-    ambientIntensity: { t: 'range',  v: 0.65,  label: '环境光强度',  min: 0, max: 2, step: 0.01 },
-    dirIntensity:     { t: 'range',  v: 1.0,   label: '主光强度',    min: 0, max: 3, step: 0.01 },
-    fillIntensity:    { t: 'range',  v: 0.30,  label: '补光强度',    min: 0, max: 3, step: 0.01 },
-    bgColor:          { t: 'color',  v: '#F0F1F5', label: '背景色' },
+    shadowSoftness:   { t: 'range',  v: 1,     label: '阴影柔和度(旧)',  min: 0, max: 2, step: 0.05 },
     gridVisible:      { t: 'switch', v: true,  label: '显示网格地面' },
+    bgColor:          { t: 'color',  v: '#F0F1F5', label: '背景色(天空盒关闭时)' },
+    toneMappingExposure:{ t: 'range', v: 0.95,  label: '曝光值 (Tone Exposure)', min: 0.3, max: 1.6, step: 0.01 },
+    // ---------- 色彩通道 CMAP ----------
+    toneMapping:      { t: 'select', v: 'agx', label: '色调映射 (Tone Mapping)', hint: '建议 AgX Filmic，更贴近电影中性肤色',
+                        options: [['aces','ACES Filmic'],['agx','AgX (推荐)'],['reinhard','Reinhard'],['cineon','Cineon'],['linear','Linear'],['none','None']] },
+    colorBalanceEnabled:{ t: 'switch', v: true, label: '色彩通道 (色温/对比/饱和)' },
+    colorTemp:        { t: 'range',  v: 5800,  label: '色温 (K)',   min: 2000, max: 12000, step: 50, hint: '2000K=暖黄 / 6500K=白 / 12000K=冷蓝' },
+    colorTint:        { t: 'range',  v: 0,     label: 'Tint (绿↔洋红)',  min: -100, max: 100, step: 1 },
+    contrast:         { t: 'range',  v: 1.05,  label: '对比度 Contrast', min: 0.5, max: 1.6, step: 0.01 },
+    saturation:       { t: 'range',  v: 1.00,  label: '饱和度 Saturation', min: 0,   max: 1.6, step: 0.01 },
+    vibrance:         { t: 'range',  v: 1.10,  label: '自然饱和 Vibrance', min: 0, max: 1.6, step: 0.01, hint: '抬升不饱和像素，避免肤色过饱和' },
+    // liftGammaGain 作为特殊控件：拆为 3 条 range 在 UI 中合并
+    liftGammaGain:    { t: 'lgg',    v: [0,1,1], label: 'Lift / Gamma / Gain' },
+    // ---------- 光照 ----------
+    hardLightMode:    { t: 'switch', v: false, label: '硬光模式',    hint: '方向光强对比+硬阴影，关闭为柔和漫射' },
+    ambientIntensity: { t: 'range',  v: 0.65,  label: '环境光强度',  min: 0, max: 2, step: 0.01 },
+    hemiIntensity:    { t: 'range',  v: 0.6,   label: '半球光强度',  min: 0, max: 2, step: 0.01 },
+    dirIntensity:     { t: 'range',  v: 1.0,   label: '主方向光强度', min: 0, max: 8, step: 0.01 },
+    dirAngle:         { t: 'range',  v: -42,   label: '主方向光方位角(°)', min: -180, max: 180, step: 1, hint: '水平角度，左/右绕角色旋转' },
+    dirHeight:        { t: 'range',  v: 38,    label: '主方向光高度角(°)', min: -15, max: 89, step: 1, hint: '仰角，太阳/月亮高低' },
+    fillIntensity:    { t: 'range',  v: 0.30,  label: '补光 (Fill) 强度', min: 0, max: 3, step: 0.01 },
+    fillLightColor:   { t: 'color',  v: '#96C8FF', label: '补光 (Fill) 颜色' },
+    dirLightColor:    { t: 'color',  v: '#FFF1DC', label: '主方向光颜色' },
+    // ---- 聚光灯 Key Light ----
+    keyLightEnabled:  { t: 'switch', v: true,  label: '聚光灯 (Key Light)', hint: '带圆锥角的主光，立体感优于方向光' },
+    keyLightIntensity:{ t: 'range',  v: 6.0,   label: '聚光灯强度',  min: 0, max: 15, step: 0.1 },
+    keyLightAngle:    { t: 'range',  v: 32,    label: '聚光角度(°)', min: 10, max: 80, step: 1 },
+    keyLightHeight:   { t: 'range',  v: 30,    label: '聚光高度角(°)', min: 5, max: 85, step: 1, hint: 'Key 光高度角，伦勃朗 62° / 蝴蝶光 68°' },
+    keyLightAzimuth:  { t: 'range',  v: 45,    label: '聚光方位角(°)', min: -180, max: 180, step: 1, hint: 'Key 光水平旋转：正前 0° / 右 45°=伦勃朗 / -170°=背' },
+    keyLightDistance: { t: 'range',  v: 5.5,   label: '聚光距离',    min: 2, max: 15, step: 0.1 },
+    keyLightPenumbra: { t: 'range',  v: 0.35,  label: '半影(柔边)',  min: 0, max: 1, step: 0.01 },
+    keyLightColor:    { t: 'color',  v: '#FFE8BF', label: '聚光灯颜色' },
+    // ---- 轮廓光 Rim ----
+    rimLightEnabled:  { t: 'switch', v: true,  label: '方向光轮廓光 (Rim)' },
+    rimLightIntensity:{ t: 'range',  v: 1.1,   label: 'Rim 光强度',  min: 0, max: 4, step: 0.01 },
+    rimLightColor:    { t: 'color',  v: '#FFC890', label: 'Rim 光颜色' },
+    rimLightAzimuth:  { t: 'range',  v: -140,  label: 'Rim 方位角(°)', min: -180, max: 180, step: 1, hint: '剪影背光预设: -170° 后上高位' },
+    rimLightHeight:   { t: 'range',  v: 45,    label: 'Rim 高度角(°)', min: 5, max: 89, step: 1 },
+    // ---- IES cookie ----
+    iesPreset:        { t: 'select', v: 'none', label: 'IES 光形 (Key Cookie)',
+                        options: [['none','无'],['softbox-round','柔光球(圆)'],['softbox-strip','柔光条(3:1)'],['grid-spot','蜂窝聚光'],['window-blind','百叶窗'],['user','自定义 PNG…']] },
+    iesUserPath:      { t: 'file',   v: '',     label: 'IES 用户 PNG', accept: 'png,jpg,webp' },
+    iesIntensityScale:{ t: 'range',  v: 1.0,    label: 'IES 强度倍率', min: 0.1, max: 4, step: 0.01 },
+    // ---- HDR 环境 ----
+    hdrPreset:        { t: 'select', v: 'none', label: 'HDR 环境 (IBL)',
+                        options: [['none','无(程序化天空盒)'],['studio-box','棚拍柔光箱'],['showroom-gray','展厅中性灰'],['sunset','日落氛围'],['neon-ring','霓虹三色环'],['window-overcast','阴天侧窗'],['user','自定义 HDR/EXR…']] },
+    hdrUserPath:      { t: 'file',   v: '',     label: '用户 HDR/EXR', accept: 'hdr,exr,png,jpg' },
+    envMapAsBackground:{ t: 'switch', v: false, label: 'HDR 同时作为背景', hint: '用 HDR 全景做背景，替代程序化天空穹顶' },
+    envMapIntensity:  { t: 'range',  v: 1.0,    label: '环境强度 (envMapIntensity)', min: 0, max: 3, step: 0.01 },
+    skyboxEnabled:    { t: 'switch', v: true,  label: '程序化天空盒' },
+    // ---------- 后处理 ----------
+    bloomEnabled:     { t: 'switch', v: true,  label: 'Bloom 泛光',   hint: '高亮区域柔化发光' },
+    bloomStrength:    { t: 'range',  v: 0.42,  label: '泛光强度',     min: 0, max: 2.0, step: 0.01 },
+    bloomThreshold:   { t: 'range',  v: 0.82,  label: '泛光阈值',     min: 0, max: 1.0, step: 0.01, hint: '低于此亮度的像素不发光' },
+    bloomRadius:      { t: 'range',  v: 0.52,  label: '泛光半径',     min: 0, max: 1.0, step: 0.01 },
+    contactShadowsEnabled:  { t: 'switch', v: true,  label: '接触阴影 Contact Shadows', hint: '脚底/褶皱处贴地增强' },
+    contactShadowsOpacity:  { t: 'range',  v: 0.55,  label: '接触阴影浓度', min: 0, max: 1.0, step: 0.01 },
+    contactShadowsDistance: { t: 'range',  v: 0.08,  label: '搜索距离(相对)', min: 0.005, max: 0.3, step: 0.005, hint: '越大阴影范围越大' },
+    // --- AO / SSGI ---
+    aoMode:           { t: 'select', v: 'ssao', label: '屏幕空间 AO 模式', hint: 'off=关闭 / ssao=轻量级 / ssgi=屏幕空间 GI（较贵）',
+                        options: [['off','关闭'],['ssao','SSAO (推荐中低档)'],['ssgi','SSGI (屏幕空间GI，贵)']] },
+    ssaoEnabled:      { t: 'switch', v: false, label: 'SSAO 环境遮蔽', hint: '屏幕空间遮蔽，褶皱/缝隙处体积感增强' },
+    ssaoIntensity:    { t: 'range',  v: 0.75,  label: 'SSAO 强度',    min: 0, max: 2.0, step: 0.01 },
+    ssaoRadius:       { t: 'range',  v: 8,     label: 'SSAO 采样半径',min: 1, max: 20, step: 0.5 },
+    ssgiEnabled:      { t: 'switch', v: false, label: 'SSGI GI 开关(联动 aoMode)' },
+    ssgiRadius:       { t: 'range',  v: 0.18,  label: 'SSGI 半径',    min: 0.02, max: 0.8, step: 0.01 },
+    ssgiThickness:    { t: 'range',  v: 0.015, label: 'SSGI 厚度阈值',min: 0.002, max: 0.1, step: 0.001 },
+    ssgiMaxRoughness: { t: 'range',  v: 0.9,   label: 'SSGI 最大粗糙度', min: 0, max: 1, step: 0.01 },
+    ssgiIntensity:    { t: 'range',  v: 1.0,   label: 'SSGI 强度',    min: 0, max: 3, step: 0.01 },
+    // --- God Ray ---
+    godRayEnabled:    { t: 'switch', v: false, label: '体积光 (God Ray)' },
+    godRayIntensity:  { t: 'range',  v: 0.85,  label: '体积光强度',   min: 0, max: 3, step: 0.01 },
+    godRayDecay:      { t: 'range',  v: 0.955, label: '体积光衰减',   min: 0.9, max: 0.999, step: 0.001 },
+    godRayWeight:     { t: 'range',  v: 0.35,  label: '体积光权重',   min: 0.1, max: 1, step: 0.01 },
+    godRaySamples:    { t: 'range',  v: 32,    label: '体积光采样数', min: 8, max: 128, step: 4 },
+    godRaySource:     { t: 'select', v: 'sun', label: '体积光来源',    options: [['sun','程序化天空太阳方向'],['keylight','聚光灯 Key Light 位置']] },
+    // --- Lens Flare ---
+    lensFlareEnabled: { t: 'switch', v: false, label: '镜头光晕 Lens Flare' },
+    lensFlareIntensity:{ t: 'range', v: 0.7,   label: '光晕强度',     min: 0, max: 3, step: 0.01 },
+    lensFlareThreshold:{ t: 'range', v: 0.9,   label: '光晕阈值',     min: 0.5, max: 1, step: 0.01 },
+    lensFlareGhosts:  { t: 'range',  v: 6,     label: '鬼影层数',     min: 1, max: 12, step: 1 },
+    lensFlareChromatic:{ t: 'range', v: 0.08,  label: '色散(彩边)',   min: 0, max: 0.2, step: 0.005 },
+    // ---------- 材质增强 ----------
+    fresnelRimEnabled:{ t: 'switch', v: true,  label: 'Fresnel 轮廓光 Shader', hint: '模型边缘一圈发微光（发丝/服饰）' },
+    fresnelRimColor:  { t: 'color',  v: '#A8C0FF', label: 'Rim Shader 颜色' },
+    fresnelRimPower:  { t: 'range',  v: 4.5,   label: 'Rim 细度',     min: 1.0, max: 10.0, step: 0.1, hint: '越大圈越细' },
+    fresnelRimIntensity:{ t: 'range',v: 0.38,  label: 'Rim 强度',     min: 0, max: 2.0, step: 0.01 },
+    shaderBevelEnabled:{ t: 'switch', v: false, label: '着色器假倒角', hint: '硬边缘高光圆润(不改几何体)' },
+    shaderBevelStrength:{ t: 'range', v: 1.2,   label: '倒角强度',     min: 0.2, max: 3.0, step: 0.05 },
+    // ---------- 阴影柔化 / VSM ----------
+    shadowMapType:    { t: 'select', v: 'vsm',  label: '阴影图类型',
+                        options: [['none','关闭'],['basic','Basic 硬'],['pcfsoft','PCF Soft 软'],['vsm','VSM 柔影(推荐)']] },
+    shadowBiasScale:  { t: 'range',  v: 1.0,    label: '阴影 Bias 倍率', min: -2, max: 2, step: 0.1, hint: 'VSM 需用紧凑 bias 防 acne；>1 更松、<1 更紧' },
+    // ---------- 手风琴持久化状态 ----------
+    renderAccordionState:{ t: 'hidden', v: '{"color":true,"preset":true,"light":false,"effects":false,"shadow":false}', label: 'render 手风琴展开状态(JSON)' },
   },
   physics: {
-    enabled:          { t: 'switch', v: true,  label: '物理（布料/刚体）', hint: '加载新模型时生效' },
-    gravity:          { t: 'range',  v: 9.8,   label: '重力 m/s²',   min: 0, max: 20, step: 0.1 },
-    unitStep:         { t: 'select', v: '1/60',label: '物理步进',
+    enabled:          { t: 'switch', v: true,  label: '物理（布料/刚体）', hint: '加载新模型时完整生效，部分参数可实时修改' },
+    gravity:          { t: 'range',  v: 6.2,   label: '重力 m/s²',   min: 0, max: 20, step: 0.1, hint: '降低布料/头发垂坠抖动的主要旋钮' },
+    unitStep:         { t: 'select', v: '1/120',label: '物理步进',
                         options: [['1/60','1/60'],['1/120','1/120'],['1/30','1/30']] },
-    maxStepNum:       { t: 'range',  v: 2,     label: '最大迭代步数', min: 1, max: 6, step: 1 },
+    maxStepNum:       { t: 'range',  v: 3,     label: '最大迭代步数', min: 1, max: 6, step: 1, hint: '高频运动时加大以避免穿模/抖动' },
     autoDisableHeavy: { t: 'switch', v: true,  label: '刚体>200自动关闭物理' },
   },
   ik: {
@@ -207,27 +306,160 @@ function setParam(group, key, value, { persist = true, apply = true } = {}) {
 }
 function applyParam(group, key, value, prev) {
   const set = (obj, field, transform) => { if (obj && typeof obj[field] !== 'undefined') obj[field] = (transform ? transform(value) : value); };
+  // 手动修改参数时，renderPreset 自动切到 custom（预设 applyPreset 内部会临时锁）
+  if (group === 'render' && !window.__presetApplyingLock && key !== 'renderPreset') {
+    try {
+      const cur = getParam('render', 'renderPreset', 'custom');
+      if (cur !== 'custom') {
+        window.__presetApplyingLock = true;
+        setParam('render', 'renderPreset', 'custom', { persist: true, apply: true });
+        initApplyingParams || refreshRenderPanelUI();
+      }
+    } finally { window.__presetApplyingLock = false; }
+  }
   if (group === 'render') {
+    if (key === 'renderPreset') { applyPreset(String(value || 'default')); return; }
+    if (key === 'presetName') { /* 只持久化，不直接生效；由 applyPreset 一并维护 */ return; }
+    if (key === 'skyboxEnabled') { try { setSkyboxEnabled(!!value); } catch (_) {} return; }
+    if (key === 'renderAccordionState') { return; } // 只持久化 JSON 字符串
+    if (key === 'toneMappingExposure') { try { renderer.toneMappingExposure = Math.max(0.3, Number(value) || 1); } catch (_) {} }
     if (key === 'shadowEnabled') set(renderer.shadowMap, 'enabled');
     if (key === 'pixelRatioMax') {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, Math.max(1, Number(value) || 1)));
       resize();
     }
-    if (key === 'bgColor') { try { scene.background = new THREE.Color(String(value)); } catch (_) {} }
+    // -------- 色彩通道 CMAP --------
+    if (key === 'toneMapping') {
+      try {
+        const want = String(value || 'agx');
+        if (window.__postfx && window.__postfx.__lastToneMapping === want) { /* noop */ }
+        else {
+          const map = {
+            aces: THREE.ACESFilmicToneMapping,
+            agx: (typeof THREE.AgXToneMapping !== 'undefined') ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping,
+            reinhard: THREE.ReinhardToneMapping,
+            cineon: THREE.CineonToneMapping,
+            linear: THREE.LinearToneMapping,
+            none: THREE.NoToneMapping,
+          };
+          renderer.toneMapping = (typeof map[want] !== 'undefined') ? map[want] : THREE.ACESFilmicToneMapping;
+          renderer.outputColorSpace = THREE.SRGBColorSpace;
+          if (window.__postfx) {
+            window.__postfx.__lastToneMapping = want;
+            // 刷新内部 RT：遍历 passes 强制 setSize
+            const vp = $('viewport');
+            const w = vp ? vp.clientWidth : (canvas.clientWidth || 1);
+            const h = vp ? vp.clientHeight : (canvas.clientHeight || 1);
+            if (w > 0 && h > 0) {
+              window.__postfx.composer.setSize(w, h);
+            }
+          }
+        }
+      } catch (_) { /* noop */ }
+    }
+    if (key === 'colorBalanceEnabled') {
+      try { ensureColorBalancePass(); } catch (_) {}
+      const postfx = window.__postfx;
+      if (postfx && postfx.colorBalancePass) postfx.colorBalancePass.enabled = !!value;
+    }
+    if (key === 'colorTemp' || key === 'colorTint') {
+      try {
+        const tK = Number(getParam('render', 'colorTemp', 5800)) || 5800;
+        const tint = Number(getParam('render', 'colorTint', 0)) || 0;
+        const cacheKey = `${tK}|${tint}`;
+        if (window.__postfx && window.__postfx.__lastTempTintKey === cacheKey) { /* 幂等跳过 */ }
+        else {
+          const gain = colorTempTintToWBGain(tK, tint);
+          ensureColorBalancePass();
+          if (window.__postfx && window.__postfx.colorBalancePass) {
+            const u = window.__postfx.colorBalancePass.uniforms;
+            u.uWBGain.value.set(gain[0], gain[1], gain[2]);
+            window.__postfx.__lastTempTintKey = cacheKey;
+          }
+        }
+      } catch (_) { /* noop */ }
+    }
+    if (key === 'contrast') { try { ensureColorBalancePass(); if (window.__postfx?.colorBalancePass) window.__postfx.colorBalancePass.uniforms.uContrast.value = Math.max(0.5, Math.min(1.6, Number(value) || 1)); } catch (_) {} }
+    if (key === 'saturation') { try { ensureColorBalancePass(); if (window.__postfx?.colorBalancePass) window.__postfx.colorBalancePass.uniforms.uSaturation.value = Math.max(0, Math.min(1.6, Number(value) || 0)); } catch (_) {} }
+    if (key === 'vibrance') { try { ensureColorBalancePass(); if (window.__postfx?.colorBalancePass) window.__postfx.colorBalancePass.uniforms.uVibrance.value = Math.max(0, Math.min(1.6, Number(value) || 0)); } catch (_) {} }
+    if (key === 'liftGammaGain') {
+      try {
+        ensureColorBalancePass();
+        if (!window.__postfx?.colorBalancePass) { /* noop */ }
+        else {
+          const arr = Array.isArray(value) ? value : getParam('render', 'liftGammaGain', [0,1,1]);
+          const lift = Math.max(-0.3, Math.min(0.3, Number(arr[0]) || 0));
+          const gam  = Math.max(0.3, Math.min(2.5, Number(arr[1]) || 1));
+          const gain = Math.max(0.3, Math.min(2.5, Number(arr[2]) || 1));
+          const u = window.__postfx.colorBalancePass.uniforms;
+          u.uLift.value = lift;
+          u.uGamma.value = gam;
+          u.uGain.value = gain;
+        }
+      } catch (_) { /* noop */ }
+    }
+    if (key === 'bgColor') {
+      try {
+        const c = new THREE.Color(String(value));
+        const asBg = !!window.__postfx && !!window.__postfx.__envBgOverride;
+        if (asBg) {
+          // HDR 作为背景时，scene.background 已被 envRT.texture 接管；bgColor 只作为雾色
+        } else if (!skyboxEnabled || (scene.background && !skyMesh)) {
+          scene.background = c;
+        }
+        _fogParams.color = c.clone().multiplyScalar(0.78).lerp(new THREE.Color(0x0B0E14), 0.35);
+        if (scene.fog) { try { scene.fog.color.copy(_fogParams.color); } catch (_) {} }
+      } catch (_) {}
+    }
     if (key === 'gridVisible') { try { gridHelper.visible = !!value; } catch (_) {} }
+    // -------- 硬光 / 阴影柔化 / VSM 柔影：统一作为 alias 写入 shadowMapType & shadowBiasScale --------
+    if (key === 'hardLightMode') {
+      try {
+        const hard = !!value;
+        // 聚光灯 penumbra 联动（保持旧行为）
+        if (typeof keyLight !== 'undefined') {
+          const cur = Number(keyLight.penumbra) || 0;
+          keyLight.penumbra = hard ? Math.min(cur, 0.38) : Math.max(cur, 0.45);
+          keyLight.shadow.mapSize.set(hard ? 2048 : 1024, hard ? 2048 : 1024);
+          keyLight.shadow.needsUpdate = true;
+        }
+        if (typeof dirLight !== 'undefined') {
+          dirLight.shadow.radius = hard ? 0.15 : 3.0;
+          dirLight.shadow.mapSize.set(hard ? 2048 : 1024, hard ? 2048 : 1024);
+          dirLight.shadow.needsUpdate = true;
+        }
+        // 硬光 → Basic；柔光 → VSM
+        setParam('render', 'shadowBiasScale', hard ? 0.8 : 1.0, { persist: false, apply: true });
+        setParam('render', 'shadowMapType', hard ? 'basic' : 'vsm', { persist: true, apply: true });
+      } catch (_) { /* noop */ }
+    }
     if (key === 'shadowSoftness') {
       try {
         const v = Number(value) || 0;
-        if (v <= 0.25) renderer.shadowMap.type = THREE.BasicShadowMap;
-        else if (v <= 0.75) renderer.shadowMap.type = THREE.PCFShadowMap;
-        else if (v <= 1.25) renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        else renderer.shadowMap.type = THREE.VSMShadowMap;
-        if (currentMesh) currentMesh.traverse && currentMesh.traverse((c) => {
-          if (c && c.isMesh && c.material) {
-            const mats = Array.isArray(c.material) ? c.material : [c.material];
-            mats.forEach((m) => { m.needsUpdate = true; });
+        let t = 'vsm';
+        if (v <= 0.25) t = 'basic';
+        else if (v <= 0.75) t = 'pcfsoft';
+        else if (v <= 1.25) t = 'vsm';
+        else t = 'vsm';
+        if (getParam('render', 'shadowMapType', 'vsm') !== t) {
+          setParam('render', 'shadowMapType', t, { persist: true, apply: true });
+        } else {
+          // 无实际类型变化，仍需要刷新阴影贴图（旧 softness 行为）
+          if (dirLight && dirLight.shadow) dirLight.shadow.needsUpdate = true;
+          if (keyLight && keyLight.shadow) keyLight.shadow.needsUpdate = true;
+        }
+        markMaterialsNeedsUpdate();
+      } catch (_) { /* noop */ }
+    }
+    if (key === 'shadowMapType' || key === 'shadowBiasScale') {
+      try {
+        applyShadowMapType(
+          String(getParam('render', 'shadowMapType', 'vsm') || 'vsm'),
+          {
+            scale: Number(getParam('render', 'shadowBiasScale', 1.0) || 1.0),
+            hardLightMode: !!getParam('render', 'hardLightMode', false),
           }
-        });
+        );
       } catch (_) { /* noop */ }
     }
     const postfx = window.__postfx;
@@ -248,20 +480,187 @@ function applyParam(group, key, value, prev) {
         } catch (_) { /* noop */ }
       }
       if (key === 'fxaaEnabled' && postfx.fxaaPass) postfx.fxaaPass.enabled = !!value;
+      if (key === 'bloomEnabled' && postfx.bloomPass) postfx.bloomPass.enabled = !!value;
+      if (key === 'bloomStrength' && postfx.bloomPass) postfx.bloomPass.strength = Number(value) || 0;
+      if (key === 'bloomThreshold' && postfx.bloomPass) postfx.bloomPass.threshold = Number(value) || 0;
+      if (key === 'bloomRadius' && postfx.bloomPass) postfx.bloomPass.radius = Number(value) || 0;
+      if (key === 'contactShadowsEnabled' && postfx.contactShadowsPass) postfx.contactShadowsPass.enabled = !!value;
+      if (key === 'contactShadowsOpacity' && postfx.contactShadowsPass) {
+        if (postfx.contactShadowsPass.uniforms) postfx.contactShadowsPass.uniforms.opacity.value = Number(value) || 0;
+      }
+      if (key === 'contactShadowsDistance' && postfx.contactShadowsPass) {
+        if (postfx.contactShadowsPass.uniforms) postfx.contactShadowsPass.uniforms.maxDistance.value = Number(value) || 0;
+      }
+      // ---- AO / SSGI ----
+      if (key === 'aoMode') { try { ensureAoMode(String(value || 'off')); } catch (_) {} }
+      if (key === 'ssaoEnabled') {
+        // Sao 实例存在时直接 enabled 切换（pass 始终在 composer.passes 里，enabled=false GPU 跳过分段，零开销）
+        if (postfx.saoPass) postfx.saoPass.enabled = !!value;
+        else if (getParam('render', 'aoMode', 'ssao') === 'ssao') try { ensureAoMode('ssao'); } catch (_) {}
+      }
+      if (key === 'ssaoIntensity' && postfx.saoPass) { try { postfx.saoPass.intensity = Number(value) || 0; } catch(_) { try { postfx.saoPass.params.intensity = Number(value) || 0; } catch(_2){} } }
+      if (key === 'ssaoRadius' && postfx.saoPass)    { try { postfx.saoPass.radius = Number(value) || 0; } catch(_)    { try { postfx.saoPass.params.radius = Number(value) || 0; } catch(_2){} } }
+      if (key === 'ssgiEnabled') {
+        const mode = String(getParam('render', 'aoMode', 'ssao') || 'ssao');
+        if (!!value && mode !== 'ssgi') setParam('render', 'aoMode', 'ssgi', { persist: true, apply: true });
+        else if (!value && mode === 'ssgi') {
+          // 关 SSGI switch → 回 ssao
+          if (postfx.ssgiPass) try { ensureAoMode('ssao'); } catch (_) {}
+        }
+      }
+      if (key === 'ssgiRadius' || key === 'ssgiThickness' || key === 'ssgiMaxRoughness' || key === 'ssgiIntensity') {
+        if (!postfx.ssgiPass) { /* SSGIPass 未创建跳过 */ }
+        else {
+          try {
+            if (key === 'ssgiRadius') {
+              if ('radius' in postfx.ssgiPass) postfx.ssgiPass.radius = Number(value) || 0;
+              if (postfx.ssgiPass.params) postfx.ssgiPass.params.radius = Number(value) || 0;
+            }
+            if (key === 'ssgiThickness') {
+              if ('thickness' in postfx.ssgiPass) postfx.ssgiPass.thickness = Number(value) || 0;
+              if (postfx.ssgiPass.params) postfx.ssgiPass.params.thickness = Number(value) || 0;
+            }
+            if (key === 'ssgiMaxRoughness') {
+              if ('maxRoughness' in postfx.ssgiPass) postfx.ssgiPass.maxRoughness = Number(value) || 0;
+              if (postfx.ssgiPass.params) postfx.ssgiPass.params.maxRoughness = Number(value) || 0;
+            }
+            if (key === 'ssgiIntensity') {
+              if ('intensity' in postfx.ssgiPass) postfx.ssgiPass.intensity = Number(value) || 0;
+              if (postfx.ssgiPass.params) postfx.ssgiPass.params.intensity = Number(value) || 0;
+            }
+            if (typeof postfx.ssgiPass.updateSSGIMaterial === 'function') postfx.ssgiPass.updateSSGIMaterial();
+          } catch (_) { /* noop */ }
+        }
+      }
+      // ---- God Ray ----
+      if (key === 'godRayEnabled') { try { ensureGodRayPass(!!value); } catch (_) {} }
+      if ((postfx.godRayPass) && ['godRayIntensity','godRayDecay','godRayWeight','godRaySamples'].indexOf(key) >= 0) {
+        try {
+          const u = postfx.godRayPass.uniforms;
+          if (key === 'godRayIntensity') u.uIntensity.value = Math.max(0, Number(value) || 0);
+          if (key === 'godRayDecay')     u.uDecay.value     = Math.max(0.8, Math.min(0.999, Number(value) || 0.95));
+          if (key === 'godRayWeight')    u.uWeight.value    = Math.max(0.05, Math.min(1, Number(value) || 0.35));
+          if (key === 'godRaySamples')   u.uSamples.value   = Math.max(8, Math.min(128, Math.floor(Number(value) || 32)));
+        } catch (_) { /* noop */ }
+      }
+      if (key === 'godRaySource') { /* 每帧在 animate 中按此值重算 uScreenLightPos，此处仅确保 pass 存在 */ try { if (getParam('render','godRayEnabled', false)) ensureGodRayPass(true); } catch(_){} }
+      // ---- Lens Flare ----
+      if (key === 'lensFlareEnabled') { try { ensureLensFlarePass(!!value); } catch (_) {} }
+      if (postfx.lensFlarePass && ['lensFlareIntensity','lensFlareThreshold','lensFlareGhosts','lensFlareChromatic'].indexOf(key) >= 0) {
+        try {
+          const u = postfx.lensFlarePass.uniforms;
+          if (key === 'lensFlareIntensity') u.uIntensity.value = Math.max(0, Number(value) || 0);
+          if (key === 'lensFlareThreshold') u.uThreshold.value = Math.max(0.1, Math.min(1, Number(value) || 0.9));
+          if (key === 'lensFlareGhosts')    u.uGhosts.value    = Math.max(1, Math.min(12, Math.floor(Number(value) || 6)));
+          if (key === 'lensFlareChromatic') u.uChromatic.value = Math.max(0, Math.min(0.3, Number(value) || 0.08));
+        } catch (_) { /* noop */ }
+      }
     }
+    // -------------- 灯光：直接改属性或通过 refreshLighting() --------------
     if (key === 'ambientIntensity') { if (typeof ambientLight !== 'undefined') { ambientLight.intensity = Number(value) || 0; } }
+    if (key === 'hemiIntensity')    { if (typeof hemisphereLight !== 'undefined') { hemisphereLight.intensity = Number(value) || 0; } }
     if (key === 'dirIntensity')     { if (typeof dirLight !== 'undefined')     { dirLight.intensity = Number(value) || 0; } }
     if (key === 'fillIntensity')    { if (typeof fillLight !== 'undefined')    { fillLight.intensity = Number(value) || 0; } }
+    if (key === 'dirLightColor')    { if (typeof dirLight !== 'undefined')     { try { dirLight.color.copy(new THREE.Color(String(value))); } catch (_){} } }
+    if (key === 'fillLightColor')   { if (typeof fillLight !== 'undefined')    { try { fillLight.color.copy(new THREE.Color(String(value))); } catch (_){} } }
+    // 球面坐标类键：只改 PARAMS 值（下次 refreshLighting() 统一刷新）
+    if (['dirAngle','dirHeight','keyLightDistance','keyLightAzimuth','keyLightHeight','rimLightAzimuth','rimLightHeight'].indexOf(key) >= 0) {
+      try { refreshLighting(); } catch (_) {}
+    }
+    // ---- SpotLight Key Light ----
+    if (key === 'keyLightEnabled')  { if (typeof keyLight !== 'undefined')     { keyLight.visible = !!value; keyLight.castShadow = !!value; } }
+    if (key === 'keyLightIntensity'){ if (typeof keyLight !== 'undefined')     { keyLight.intensity = Number(value) || 0; try { refreshLighting(); } catch(_){} } }
+    if (key === 'keyLightAngle')    { if (typeof keyLight !== 'undefined')     { keyLight.angle = Math.PI / 180 * (Number(value) || 30); keyLight.updateProjectionMatrix && keyLight.updateProjectionMatrix(); } }
+    if (key === 'keyLightPenumbra') { if (typeof keyLight !== 'undefined')     { keyLight.penumbra = Math.max(0, Math.min(1, Number(value) || 0)); } }
+    if (key === 'keyLightColor')    { if (typeof keyLight !== 'undefined')     { try { keyLight.color.copy(new THREE.Color(String(value))); } catch (_){} } }
+    if (key === 'iesIntensityScale'){ if (typeof keyLight !== 'undefined')     { try { refreshLighting(); } catch (_){} } }
+    if (key === 'iesPreset' || key === 'iesUserPath') { try { loadIesTexture(); } catch (_) {} }
+    // ---- Rim Directional ----
+    if (key === 'rimLightEnabled')  { if (typeof rimLight !== 'undefined')     { rimLight.visible = !!value; } }
+    if (key === 'rimLightIntensity'){ if (typeof rimLight !== 'undefined')     { rimLight.intensity = Number(value) || 0; } }
+    if (key === 'rimLightColor')    { if (typeof rimLight !== 'undefined')     { try { rimLight.color.copy(new THREE.Color(String(value))); } catch (_){} } }
+    // ---- HDR / Environment ----
+    if (['hdrPreset','hdrUserPath','envMapAsBackground','envMapIntensity'].indexOf(key) >= 0) {
+      try {
+        rebuildEnvMap({
+          preset:    String(getParam('render','hdrPreset','none') || 'none'),
+          userPath:  String(getParam('render','hdrUserPath','') || ''),
+          asBg:      !!getParam('render','envMapAsBackground', false),
+          intensity: Number(getParam('render','envMapIntensity', 1.0) || 1.0),
+        });
+      } catch (_) { /* noop */ }
+    }
+    // -------------- 材质增强（Shader 注入，应用到所有已加载材质）--------------
+    if (['fresnelRimEnabled','fresnelRimColor','fresnelRimPower','fresnelRimIntensity',
+         'shaderBevelEnabled','shaderBevelStrength'].indexOf(key) >= 0) {
+      try { markMaterialsNeedsUpdate(); } catch (_){}
+    }
+    // ---- 收尾：快捷面板 chip 更新（幂等：内部缓存） ----
+    try { updateRqpChip(); } catch (_) {}
   } else if (group === 'physics' || group === 'ik') {
     // 这些参数需要下一次 helper.add（重建 physics/ikSolver）才会生效：
     // 这里立即尝试对 mmdHelper.objects 中当前 mesh 的 ikSolver/physics 做一次尽力修改，能改就改；
     // 不能改的（重建级别）保持 PARAMS 值即可，下一次 loadModel / btn-stop / playVmd 会读取。
     if (group === 'physics') {
-      // gravity 对 physics world（已启动的）重建成本高，保留在下一次 helper.add；此处只提示
-      if (key === 'gravity' || key === 'unitStep' || key === 'maxStepNum' || key === 'enabled' || key === 'autoDisableHeavy') {
+      // 遍历当前所有已 add 的 mesh physics 做尽力实时修改（所有 mesh 都改，不局限于 currentMesh）
+      const meshTargets = [];
+      if (mmdHelper && mmdHelper.objects) {
+        try {
+          for (const m of mmdHelper.objects.keys()) {
+            if (m && m.isMesh) meshTargets.push(m);
+          }
+        } catch (_) {}
+      }
+      if (key === 'gravity') {
+        const gravityN = Math.max(0, Number(value) || 0);
+        meshTargets.forEach((m) => {
+          try { tunePhysicsForMesh(m); } catch (_) {}  // tunePhysicsForMesh 内会重算 world.setGravity
+        });
         if (!initApplyingParams) {
-          try { setStatus(`物理参数「${key}」会在下一次加载模型/停止动作时应用`, 'warn'); } catch (_) { /* noop */ }
+          try { setStatus(`物理重力已实时调整为 ${gravityN.toFixed(1)} m/s²`, 'info'); } catch (_) { /* noop */ }
         }
+        return;
+      }
+      if (key === 'enabled') {
+        meshTargets.forEach((m) => {
+          try {
+            const obj = mmdHelper && mmdHelper.objects && mmdHelper.objects.get(m);
+            if (!obj) return;
+            if (!!value) {
+              // 开启：把之前缓存的 physics 存回 obj（如果 obj.__disabledPhysics 有备份）
+              if (obj.__disabledPhysics && !obj.physics) {
+                obj.physics = obj.__disabledPhysics;
+                obj.__disabledPhysics = null;
+                try {
+                  if (m && m.updateMatrixWorld) m.updateMatrixWorld(true);
+                  if (obj.physics && obj.physics.reset) obj.physics.reset();
+                  tunePhysicsForMesh(m, { forceApplyDamping: true });
+                } catch (_) {}
+              }
+              mmdHelper.enabled.physics = true;
+            } else {
+              // 关闭：保存 physics 引用并置 null，让 helper 不再更新；保留 __disabledPhysics 以便再开启
+              if (obj.physics) { obj.__disabledPhysics = obj.physics; obj.physics = null; }
+              mmdHelper.enabled.physics = false;
+            }
+          } catch (_) {}
+        });
+        return;
+      }
+      if (key === 'unitStep' || key === 'maxStepNum') {
+        // 这两个值是 mmdHelper.configuration / physics 创建级别，已在运行的 physics 无法替换 step；
+        // 仍对当前所有 mesh 尝试 tune（避免误操作完全无反应），并提示下次生效
+        meshTargets.forEach((m) => { try { tunePhysicsForMesh(m, { forceApplyDamping: true }); } catch (_) {} });
+        if (!initApplyingParams) {
+          try { setStatus(`物理参数「${key}」已记录，会在下一次加载模型/停止动作时应用`, 'warn'); } catch (_) { /* noop */ }
+        }
+        return;
+      }
+      if (key === 'autoDisableHeavy') {
+        if (!initApplyingParams) {
+          try { setStatus(`物理参数「${key}」已记录，下一次加载模型时判断刚体数量是否自动关闭物理`, 'info'); } catch (_) { /* noop */ }
+        }
+        return;
       }
     }
     if (group === 'ik') {
@@ -359,6 +758,624 @@ function resetAllParams() {
     setParam(g, k, defaults[gk], { persist: true, apply: true });
   }
 }
+// 所有已加载材质 needsUpdate=true，让 onBeforeCompile 重新注入 Shader（Fresnel Rim / 假倒角）
+function markMaterialsNeedsUpdate() {
+  const touched = new WeakSet();
+  const applyTo = (m) => {
+    if (!m || !m.isMesh || !m.material) return;
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    mats.forEach((mat) => {
+      if (!mat || touched.has(mat)) return;
+      touched.add(mat);
+      try {
+        // 触发 onBeforeCompile 重新编译（重注入 Fresnel/Bevel uniform 和 chunk）
+        injectEnhancementShader(mat);
+        mat.needsUpdate = true;
+      } catch (_) { /* noop */ }
+    });
+  };
+  if (currentMesh) currentMesh.traverse && currentMesh.traverse(applyTo);
+  (sceneItems || []).forEach((s) => { if (s && s.mesh && s.mesh.traverse) s.mesh.traverse(applyTo); });
+}
+// 一键渲染预设：9 套（default/film/natural/studio + 新增 5 套：rembrandt/butterfly/backlit/coldnight/neon）+ custom 纯占位
+// 注意：预设只写入数值，不触发手动改值时的 custom 自动切换（用 __presetApplyingLock 锁）
+// 预设结构：{label, overrides}；overrides 仅写"非 DEFAULT"值，避免冗余
+const _PRESETS = {
+  default: {
+    label: '🟰 默认预览',
+    overrides: {},
+  },
+  film: {
+    label: '🎞 电影质感',
+    overrides: {
+      toneMapping: 'agx',
+      toneMappingExposure: 0.82,
+      colorTemp: 5400,
+      contrast: 1.12,
+      hardLightMode: true,
+      ambientIntensity: 0.08,
+      hemiIntensity: 0.18,
+      dirIntensity: 4.8,
+      dirHeight: 38,
+      dirAngle: -42,
+      fillIntensity: 0.7,
+      fillLightColor: '#BFD4F0',
+      dirLightColor: '#FFE4BD',
+      keyLightEnabled: true,
+      keyLightIntensity: 6.2,
+      keyLightAngle: 28,
+      keyLightHeight: 28,
+      keyLightDistance: 5.5,
+      keyLightAzimuth: 45,
+      keyLightPenumbra: 0.35,
+      keyLightColor: '#FFC98B',
+      rimLightEnabled: true,
+      rimLightIntensity: 1.1,
+      rimLightColor: '#FFA560',
+      shadowMapType: 'vsm',
+      bloomEnabled: true,
+      bloomStrength: 0.36,
+      bloomThreshold: 0.86,
+      bloomRadius: 0.55,
+      contactShadowsEnabled: true,
+      contactShadowsOpacity: 0.56,
+      contactShadowsDistance: 0.08,
+      aoMode: 'ssao',
+      ssaoEnabled: true,
+      ssaoIntensity: 0.80,
+      ssaoRadius: 9,
+      fresnelRimEnabled: true,
+      fresnelRimColor: '#FFB78A',
+      fresnelRimPower: 4.4,
+      fresnelRimIntensity: 0.34,
+      shaderBevelEnabled: true,
+      shaderBevelStrength: 1.2,
+      skyboxEnabled: true,
+    },
+  },
+  natural: {
+    label: '🌤 自然预览',
+    overrides: {
+      toneMapping: 'agx',
+      toneMappingExposure: 0.95,
+      colorTemp: 6200,
+      hardLightMode: false,
+      ambientIntensity: 0.28,
+      hemiIntensity: 0.44,
+      dirIntensity: 2.2,
+      dirHeight: 42,
+      dirAngle: -30,
+      fillIntensity: 0.5,
+      fillLightColor: '#A8C0FF',
+      dirLightColor: '#FFF1DC',
+      keyLightEnabled: true,
+      keyLightIntensity: 3.6,
+      keyLightAngle: 34,
+      keyLightHeight: 24,
+      keyLightAzimuth: 38,
+      keyLightPenumbra: 0.55,
+      keyLightColor: '#FFE8BF',
+      rimLightEnabled: true,
+      rimLightIntensity: 0.65,
+      rimLightColor: '#FFC890',
+      bloomEnabled: true,
+      bloomStrength: 0.20,
+      bloomThreshold: 0.92,
+      bloomRadius: 0.30,
+      contactShadowsEnabled: true,
+      contactShadowsOpacity: 0.35,
+      contactShadowsDistance: 0.06,
+      aoMode: 'ssao',
+      ssaoEnabled: false,
+      ssaoIntensity: 0.60,
+      ssaoRadius: 7,
+      fresnelRimEnabled: true,
+      fresnelRimColor: '#A8C0FF',
+      fresnelRimPower: 5.0,
+      fresnelRimIntensity: 0.22,
+      shaderBevelEnabled: false,
+      shaderBevelStrength: 1.0,
+      skyboxEnabled: true,
+    },
+  },
+  studio: {
+    label: '🎬 原色工作室',
+    overrides: {
+      toneMapping: 'agx',
+      toneMappingExposure: 0.88,
+      colorTemp: 5600,
+      saturation: 1.08,
+      hardLightMode: true,
+      ambientIntensity: 0.18,
+      hemiIntensity: 0.30,
+      dirIntensity: 5.2,
+      dirHeight: 42,
+      dirAngle: -44,
+      fillIntensity: 0.55,
+      fillLightColor: '#BFD4F0',
+      dirLightColor: '#E8EEFF',
+      keyLightEnabled: true,
+      keyLightIntensity: 7.2,
+      keyLightAngle: 26,
+      keyLightHeight: 32,
+      keyLightAzimuth: 42,
+      keyLightPenumbra: 0.25,
+      keyLightColor: '#D8E3FF',
+      rimLightEnabled: true,
+      rimLightIntensity: 0.95,
+      rimLightColor: '#B4C5FF',
+      shadowMapType: 'vsm',
+      bloomEnabled: false,
+      bloomStrength: 0.10,
+      bloomThreshold: 0.98,
+      bloomRadius: 0.15,
+      contactShadowsEnabled: true,
+      contactShadowsOpacity: 0.68,
+      contactShadowsDistance: 0.09,
+      aoMode: 'ssao',
+      ssaoEnabled: true,
+      ssaoIntensity: 0.90,
+      ssaoRadius: 10,
+      fresnelRimEnabled: false,
+      fresnelRimColor: '#FFFFFF',
+      fresnelRimPower: 5.0,
+      fresnelRimIntensity: 0.08,
+      shaderBevelEnabled: true,
+      shaderBevelStrength: 1.5,
+      skyboxEnabled: false,
+    },
+  },
+  rembrandt: {
+    label: '🖼 伦勃朗肖像',
+    overrides: {
+      toneMapping: 'agx',
+      toneMappingExposure: 0.9,
+      colorTemp: 5700,
+      contrast: 1.15,
+      hardLightMode: true,
+      ambientIntensity: 0.08,
+      hemiIntensity: 0.2,
+      dirIntensity: 2.8,
+      dirHeight: 30,
+      dirAngle: -40,
+      fillIntensity: 0.3,
+      fillLightColor: '#9bbad0',
+      dirLightColor: '#F5E9D0',
+      keyLightEnabled: true,
+      keyLightIntensity: 8.0,
+      keyLightAngle: 36,
+      keyLightHeight: 62,
+      keyLightAzimuth: 55,
+      keyLightPenumbra: 0.30,
+      keyLightColor: '#FFD8A8',
+      rimLightEnabled: true,
+      rimLightIntensity: 0.4,
+      rimLightColor: '#FFC890',
+      contactShadowsEnabled: true,
+      contactShadowsOpacity: 0.50,
+      contactShadowsDistance: 0.07,
+      shadowMapType: 'vsm',
+      bloomEnabled: true,
+      bloomStrength: 0.30,
+      bloomThreshold: 0.86,
+      bloomRadius: 0.40,
+      skyboxEnabled: true,
+    },
+  },
+  butterfly: {
+    label: '🦋 蝴蝶光时尚',
+    overrides: {
+      toneMapping: 'agx',
+      toneMappingExposure: 0.92,
+      colorTemp: 6000,
+      saturation: 1.05,
+      vibrance: 1.15,
+      hardLightMode: false,
+      ambientIntensity: 0.22,
+      hemiIntensity: 0.36,
+      dirIntensity: 2.5,
+      dirHeight: 40,
+      dirAngle: -30,
+      fillIntensity: 0.7,
+      fillLightColor: '#A8C0FF',
+      dirLightColor: '#FFF4E4',
+      keyLightEnabled: true,
+      keyLightIntensity: 7.6,
+      keyLightAngle: 30,
+      keyLightHeight: 68,
+      keyLightAzimuth: 0,  // 正前
+      keyLightPenumbra: 0.28,
+      keyLightColor: '#FFEED5',
+      rimLightEnabled: true,
+      rimLightIntensity: 0.85,
+      rimLightColor: '#FFC890',
+      bloomEnabled: true,
+      bloomStrength: 0.25,
+      bloomThreshold: 0.9,
+      bloomRadius: 0.38,
+      aoMode: 'ssao',
+      ssaoEnabled: true,
+      ssaoIntensity: 0.60,
+      ssaoRadius: 8,
+      skyboxEnabled: true,
+    },
+  },
+  backlit: {
+    label: '🌇 剪影背光',
+    overrides: {
+      toneMapping: 'agx',
+      toneMappingExposure: 0.88,
+      colorTemp: 6400,
+      contrast: 1.18,
+      hardLightMode: false,
+      ambientIntensity: 0.10,
+      hemiIntensity: 0.18,
+      dirIntensity: 1.8,
+      dirHeight: 18,
+      dirAngle: 25,
+      fillIntensity: 0.4,
+      fillLightColor: '#7a9ec9',
+      dirLightColor: '#E8F0FF',
+      keyLightEnabled: true,
+      keyLightIntensity: 1.6,
+      keyLightHeight: 15,
+      keyLightAzimuth: 0,
+      keyLightPenumbra: 0.6,
+      keyLightColor: '#C8D8FF',
+      rimLightEnabled: true,
+      rimLightIntensity: 3.2,
+      rimLightAzimuth: -170,
+      rimLightHeight: 52,
+      rimLightColor: '#ffe9cc',
+      hdrPreset: 'showroom-gray',
+      envMapAsBackground: true,
+      envMapIntensity: 1.1,
+      bloomEnabled: true,
+      bloomStrength: 0.28,
+      bloomThreshold: 0.84,
+      bloomRadius: 0.45,
+      shadowMapType: 'vsm',
+      skyboxEnabled: false,
+    },
+  },
+  coldnight: {
+    label: '🌙 冷夜氛围',
+    overrides: {
+      toneMapping: 'agx',
+      toneMappingExposure: 0.86,
+      colorTemp: 4100,
+      colorTint: -12,
+      contrast: 1.08,
+      hardLightMode: false,
+      ambientIntensity: 0.05,
+      hemiIntensity: 0.10,
+      dirIntensity: 1.6,
+      dirAngle: -28,
+      dirHeight: 20,
+      fillIntensity: 0.9,
+      fillLightColor: '#3f6db0',
+      dirLightColor: '#7aa0d8',
+      keyLightEnabled: true,
+      keyLightIntensity: 2.4,
+      keyLightHeight: 36,
+      keyLightAzimuth: 30,
+      keyLightColor: '#7fb7ff',
+      keyLightPenumbra: 0.5,
+      rimLightEnabled: true,
+      rimLightIntensity: 0.9,
+      rimLightColor: '#8ab4ff',
+      rimLightAzimuth: -150,
+      rimLightHeight: 40,
+      hdrPreset: 'window-overcast',
+      envMapAsBackground: false,
+      envMapIntensity: 0.8,
+      godRayEnabled: true,
+      godRayIntensity: 0.4,
+      godRaySource: 'keylight',
+      bloomEnabled: true,
+      bloomStrength: 0.30,
+      bloomThreshold: 0.88,
+      bloomRadius: 0.50,
+      shadowMapType: 'vsm',
+      skyboxEnabled: true,
+    },
+  },
+  neon: {
+    label: '🌈 霓虹舞台',
+    overrides: {
+      toneMapping: 'reinhard',
+      toneMappingExposure: 0.90,
+      colorTemp: 7200,
+      saturation: 1.35,
+      vibrance: 1.40,
+      contrast: 1.20,
+      hardLightMode: false,
+      ambientIntensity: 0.02,
+      hemiIntensity: 0.05,
+      dirIntensity: 1.2,
+      dirAngle: -20,
+      dirHeight: 12,
+      fillIntensity: 1.2,
+      fillLightColor: '#33c6ff',
+      dirLightColor: '#2a3060',
+      keyLightEnabled: true,
+      keyLightIntensity: 5.6,
+      keyLightHeight: 40,
+      keyLightAzimuth: 55,
+      keyLightColor: '#ff3d9f',
+      keyLightPenumbra: 0.45,
+      rimLightEnabled: true,
+      rimLightIntensity: 2.4,
+      rimLightAzimuth: -160,
+      rimLightHeight: 46,
+      rimLightColor: '#7bffb0',
+      hdrPreset: 'neon-ring',
+      envMapAsBackground: true,
+      envMapIntensity: 1.2,
+      bloomEnabled: true,
+      bloomStrength: 0.48,
+      bloomThreshold: 0.60,
+      bloomRadius: 0.70,
+      lensFlareEnabled: true,
+      lensFlareIntensity: 0.9,
+      lensFlareThreshold: 0.68,
+      lensFlareGhosts: 6,
+      lensFlareChromatic: 0.10,
+      shadowMapType: 'vsm',
+      skyboxEnabled: false,
+    },
+  },
+  custom: {
+    label: '🎛 自定义',
+    overrides: {}, // custom = 不做任何批量覆盖
+  },
+};
+function applyPreset(name) {
+  const preset = _PRESETS[name];
+  if (!preset) {
+    console.warn('[applyPreset] 未知预设:', name, '；回退 default');
+    try { setStatus(`预设「${name}」不存在，已回退默认预览`, 'warn'); } catch (_) {}
+    name = 'default';
+  }
+  window.__presetApplyingLock = true;
+  window.__presetApplying = true;
+  try {
+    const overrides = (preset && preset.overrides) || {};
+    // ② 批量 noApply + noSave 写入 overrides 的所有键
+    for (const k of Object.keys(overrides)) {
+      const def = DEFAULT_PARAMS.render && DEFAULT_PARAMS.render[k];
+      if (!def) continue;
+      let v = overrides[k];
+      if (def.t === 'switch') v = !!v;
+      else if (def.t === 'range') v = Number(v);
+      // 'select' 保留 string；'lgg' 保留 数组；'hidden'/'file' 原样
+      setParam('render', k, v, { persist: false, apply: false });
+    }
+    // ③ 一次性落盘
+    saveParams();
+    // ④ 统一刷新灯光/阴影
+    try { refreshLighting(); } catch (_) {}
+    // ⑤ 对收尾键触发一次 applyParam（都有幂等保护，不怕重复）
+    const tailKeys = [
+      'toneMapping','colorTemp','colorTint','contrast','saturation','vibrance','liftGammaGain','colorBalanceEnabled',
+      'shadowMapType','aoMode','hdrPreset','iesPreset',
+      'godRayEnabled','lensFlareEnabled','envMapAsBackground','envMapIntensity','iesIntensityScale',
+      'ssaoEnabled','ssgiEnabled','bloomEnabled','outlineEnabled','fxaaEnabled',
+      'skyboxEnabled'
+    ];
+    for (const k of tailKeys) {
+      try { applyParam('render', k, getParam('render', k, null), undefined); } catch (_) {}
+    }
+    // ⑥ 同步 presetName / renderPreset
+    setParam('render', 'presetName', name, { persist: true, apply: false });
+    setParam('render', 'renderPreset', name, { persist: true, apply: false });
+  } finally {
+    window.__presetApplyingLock = false;
+    // 预设切换期间布料/物理的抖动抑制：再保 1 帧
+    requestAnimationFrame(() => { try { window.__presetApplying = false; } catch (_) {} });
+    try { refreshRenderPanelUI(); } catch (_) {}
+    try { updateRqpChip(); } catch (_) {}
+    try { setStatus(`渲染预设：${(preset&&preset.label)||name}`, 'info'); } catch (_) {}
+  }
+}
+// 刷新渲染面板所有控件值（保持控件与 PARAMS 一致，预设切换或 custom 跳转时调用）
+function refreshRenderPanelUI() {
+  // 1) 右侧完整参数面板：复用已有的 syncParamValuesFromState（基于 p_group_key ID 查）
+  try { syncParamValuesFromState('render'); } catch (_) {}
+  // 2) 工具栏快捷浮层：同步所有开关/滑块/预设
+  try { syncRenderQuickPanelUI(); } catch (_) {}
+  // 3) 同步工具栏按钮 active 状态
+  try {
+    const sbBtn = $('btn-toggle-skybox');
+    if (sbBtn) sbBtn.classList.toggle('active', !!getParam('render', 'skyboxEnabled', true));
+  } catch (_) {}
+}
+
+// =================================================================
+// 材质增强 Shader 注入：Fresnel Rim + 假倒角 (Normal Wrangle)
+// 挂 material.onBeforeCompile，当 needsUpdate=true 重新编译时生效
+// =================================================================
+function _hexToRgb(hex) {
+  try {
+    const c = new THREE.Color(String(hex || '#FFFFFF'));
+    return [c.r, c.g, c.b];
+  } catch (_) { return [1,1,1]; }
+}
+function injectEnhancementShader(mat) {
+  if (!mat || mat.isShaderMaterial) return;
+  // 读取当前 PARAMS 中的增强配置（每个材质编译时都是最新的参数值）
+  const rimEnabled = !!getParam('render', 'fresnelRimEnabled', true);
+  const [rimR, rimG, rimB] = _hexToRgb(getParam('render', 'fresnelRimColor', '#A8C0FF'));
+  const rimPower = Math.max(0.5, Number(getParam('render', 'fresnelRimPower', 4.5)) || 4.5);
+  const rimIntensity = Math.max(0, Number(getParam('render', 'fresnelRimIntensity', 0.38)) || 0);
+  const bevelEnabled = !!getParam('render', 'shaderBevelEnabled', false);
+  const bevelStrength = Math.max(0.1, Number(getParam('render', 'shaderBevelStrength', 1.2)) || 1.2);
+  // 避免重复注入标记
+  if (mat.__enhInjected && mat.__enhCache
+    && mat.__enhCache.rimEnabled === rimEnabled
+    && mat.__enhCache.rimPower === rimPower
+    && mat.__enhCache.rimIntensity === rimIntensity
+    && mat.__enhCache.bevelEnabled === bevelEnabled
+    && mat.__enhCache.bevelStrength === bevelStrength
+    && Math.abs(mat.__enhCache.rimR - rimR) < 0.001
+    && Math.abs(mat.__enhCache.rimG - rimG) < 0.001
+    && Math.abs(mat.__enhCache.rimB - rimB) < 0.001) {
+    return; // 配置未变，无需重写 onBeforeCompile
+  }
+  mat.__enhCache = { rimEnabled, rimPower, rimIntensity, bevelEnabled, bevelStrength, rimR, rimG, rimB };
+  mat.__enhInjected = true;
+  mat.onBeforeCompile = function (shader, renderer) {
+    // ---- Uniforms ----
+    shader.uniforms._RimEnabled =    { value: rimEnabled ? 1.0 : 0.0 };
+    shader.uniforms._RimColor =      { value: new THREE.Color(rimR, rimG, rimB) };
+    shader.uniforms._RimPower =      { value: rimPower };
+    shader.uniforms._RimIntensity =  { value: rimIntensity };
+    shader.uniforms._BevelEnabled =  { value: bevelEnabled ? 1.0 : 0.0 };
+    shader.uniforms._BevelStrength = { value: bevelStrength };
+    // ---- Vertex: 传 worldNormal / worldPos / viewDir 到片元 ----
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>\nvarying vec3 vEnhWorldNormal;\nvarying vec3 vEnhWorldPos;\nvarying vec3 vEnhViewDir;\n`
+      )
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>\n` +
+        `  vEnhWorldNormal = normalize(mat3(modelMatrix) * normal);\n` +
+        `  vEnhWorldPos = worldPosition.xyz;\n` +
+        `  vEnhViewDir = normalize(cameraPosition - worldPosition.xyz);\n`
+      );
+    // ---- Fragment: 1) 倒角 -> 修正 normal; 2) Fresnel Rim -> 加到 gl_FragColor.rgb ----
+    let fragHeader =
+      `#extension GL_OES_standard_derivatives : enable\n` +
+      `varying vec3 vEnhWorldNormal;\n` +
+      `varying vec3 vEnhWorldPos;\n` +
+      `varying vec3 vEnhViewDir;\n` +
+      `uniform float _RimEnabled;\n` +
+      `uniform vec3  _RimColor;\n` +
+      `uniform float _RimPower;\n` +
+      `uniform float _RimIntensity;\n` +
+      `uniform float _BevelEnabled;\n` +
+      `uniform float _BevelStrength;\n` +
+      // 假倒角：基于 face normal(dFdx/dFdy 叉乘) 与 smooth normal 的差，做加权平均
+      `vec3 _enhBevelNormal(vec3 N, vec3 pos) {\n` +
+      `  vec3 dp1 = dFdx(pos);\n` +
+      `  vec3 dp2 = dFdy(pos);\n` +
+      `  vec3 faceN = normalize(cross(dp1, dp2));\n` +
+      `  if (!gl_FrontFacing) faceN = -faceN;\n` +
+      `  float mixK = clamp(_BevelStrength * 0.45, 0.0, 1.0);\n` +
+      `  vec3 blended = normalize(mix(N, faceN, mixK));\n` +
+      `  // 用 dot 的余弦再做一层锐化：硬边对齐面法线，平滑区保持原 normal\n` +
+      `  float d = abs(dot(N, faceN));\n` +
+      `  float sharp = smoothstep(0.55, 0.92, 1.0 - d);\n` +
+      `  return normalize(mix(N, blended, sharp * _BevelEnabled));\n` +
+      `}\n`;
+    shader.fragmentShader = fragHeader + shader.fragmentShader;
+    // ---- 在 <normal_fragment_begin> 之后把修正过的法线替换进 geometryNormal ----
+    // normal_fragment_begin 里有 `vec3 normal = normalize( vNormal );`，我们可以在其后追加：
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_begin>',
+      `#include <normal_fragment_begin>\n` +
+      `  normal = _enhBevelNormal(normalize(vEnhWorldNormal), vEnhWorldPos);\n` +
+      `  #ifdef USE_TANGENT\n` +
+      `    // 如果有 tangent 空间，重新把 worldNormal 投影回 TBN 用于 normalmap\n` +
+      `    mat3 TBN = mat3( normalize( vTBN[0] ), normalize( vTBN[1] ), normalize( vTBN[2] ) );\n` +
+      `    normal = normalize( TBN * normal );\n` +
+      `  #endif\n`
+    );
+    // ---- 在最后输出颜色之前（`#include <dithering_fragment>` 之后）叠加 Fresnel Rim ----
+    // dithering_fragment 一般在 `gl_FragColor = ...` 之前最后一个 chunk；
+    // 对 MeshLambert/Phong 等旧材质，输出是 `gl_FragColor = vec4( outgoingLight, diffuseColor.a );`；
+    // 我们直接在输出前追加 `gl_FragColor.rgb += rim * rimIntensity * rimEnabled`：
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <dithering_fragment>',
+      `#include <dithering_fragment>\n` +
+      `  if (_RimEnabled > 0.5 && _RimIntensity > 0.0001) {\n` +
+      `    vec3 V = normalize(vEnhViewDir);\n` +
+      `    vec3 N2 = normalize(vEnhWorldNormal);\n` +
+      `    float fres = pow(1.0 - max(dot(N2, V), 0.0), _RimPower);\n` +
+      `    vec3 rimCol = _RimColor * fres * _RimIntensity;\n` +
+      `    gl_FragColor.rgb += rimCol;\n` +
+      `  }\n`
+    );
+  };
+  mat.needsUpdate = true;
+}
+
+// =================================================================
+// 接触阴影 Contact Shadows Shader（屏幕空间光线步进）
+// 读取深度缓冲 → 朝法线方向 N 步 → 命中“紧贴”像素则加暗
+// =================================================================
+const ContactShadowsShader = {
+  uniforms: {
+    tDiffuse:     { value: null },   // 来自 ShaderPass 的上一帧颜色
+    tDepth:       { value: null },   // RenderPass.depthTexture
+    resolution:   { value: new THREE.Vector2(1, 1) },
+    cameraNear:   { value: 0.1 },
+    cameraFar:    { value: 1000.0 },
+    opacity:      { value: 0.55 },
+    maxDistance:  { value: 0.08 },   // 归一化搜索距离（越小越贴边）
+    steps:        { value: 10 },     // 光线步数
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform sampler2D tDepth;
+    uniform vec2  resolution;
+    uniform float cameraNear;
+    uniform float cameraFar;
+    uniform float opacity;
+    uniform float maxDistance;
+    uniform int   steps;
+    varying vec2 vUv;
+
+    float readDepth(vec2 uv) {
+      float z = texture2D(tDepth, uv).x;
+      // z 是 [0,1]，转为视角线性深度 [-near,-far] -> [0,1]
+      float ndcZ = z * 2.0 - 1.0;
+      float linear = (2.0 * cameraNear * cameraFar) / (cameraFar + cameraNear - ndcZ * (cameraFar - cameraNear));
+      return linear / cameraFar; // 归一化 [0,1]
+    }
+    void main() {
+      vec4  col = texture2D(tDiffuse, vUv);
+      float d   = readDepth(vUv);
+      if (d >= 0.9999) { // 未命中任何几何体（天空/背景）
+        gl_FragColor = col;
+        return;
+      }
+      // 估计屏幕空间法线（从深度梯度的叉乘）
+      float dx = d - readDepth(vUv + vec2(1.0 / resolution.x, 0.0));
+      float dy = d - readDepth(vUv + vec2(0.0, 1.0 / resolution.y));
+      vec3 normal = normalize(cross(
+        vec3(1.0 / resolution.x, 0.0, dx * 0.5),
+        vec3(0.0, 1.0 / resolution.y, dy * 0.5)
+      ));
+      // 光线步进：沿 +Z(forward) 方向并朝法线偏一个角度，找“紧贴”像素
+      vec2 dir = vec2(-normal.x, -normal.y) * 0.5 + vec2(0.0, 0.02);
+      dir = normalize(dir) * maxDistance / float(steps);
+      float shadow = 0.0;
+      vec2 cur = vUv;
+      for (int i = 1; i <= 16; i++) {
+        if (i > steps) break;
+        cur += dir;
+        if (cur.x < 0.0 || cur.x > 1.0 || cur.y < 0.0 || cur.y > 1.0) break;
+        float sd = readDepth(cur);
+        float diff = d - sd;              // 正 = 当前像素“更近”
+        // 如果 diff 在 (0, maxDistance*0.5) 之间视为有接触
+        float hit = smoothstep(0.0, maxDistance * 0.5, diff) * (1.0 - smoothstep(maxDistance * 0.5, maxDistance, diff));
+        shadow = max(shadow, hit);
+      }
+      shadow = 1.0 - shadow * opacity;
+      gl_FragColor = vec4(col.rgb * shadow, col.a);
+    }
+  `,
+};
 // 基于当前 PARAMS 构建 mmdHelper.add / playVmd fallback add 所需的 physics/ik/gravity/unitStep/maxStepNum
 function buildHelperOptions(mesh, extra = {}) {
   const rbCount = (mesh && mesh.userData && mesh.userData.rigidBodies && mesh.userData.rigidBodies.length) || 0;
@@ -367,10 +1384,10 @@ function buildHelperOptions(mesh, extra = {}) {
     physics = false;
     try { setStatus(`模型刚体 ${rbCount} 个过多，布料物理已自动关闭（腿部 IK 正常）`, 'warn'); } catch (_) { /* noop */ }
   }
-  const gravityN = Math.max(0, Number(getParam('physics', 'gravity', 9.8)) || 0);
-  const unitStepStr = String(getParam('physics', 'unitStep', '1/60'));
+  const gravityN = Math.max(0, Number(getParam('physics', 'gravity', 6.2)) || 0);
+  const unitStepStr = String(getParam('physics', 'unitStep', '1/120'));
   const unitStep = (unitStepStr === '1/120') ? 1/120 : (unitStepStr === '1/30' ? 1/30 : 1/60);
-  const maxStepNum = Math.max(1, Math.floor(Number(getParam('physics', 'maxStepNum', 2)) || 1));
+  const maxStepNum = Math.max(1, Math.floor(Number(getParam('physics', 'maxStepNum', 3)) || 1));
   return Object.assign({
     animation: undefined,
     physics,
@@ -379,6 +1396,24 @@ function buildHelperOptions(mesh, extra = {}) {
     gravity: new THREE.Vector3(0, -gravityN * 10, 0),
     resetPosition: true,
     resetRotation: true,
+    // MMDPhysics 创建后，对每个 Ammo 刚体追加线性/角阻尼（显著衰减布料高频振荡/抖动）
+    onCreatedPhysics(physicsObj) {
+      try {
+        if (!physicsObj || !Array.isArray(physicsObj.bodies)) return;
+        for (const rb of physicsObj.bodies) {
+          if (!rb || !rb.body) continue;
+          // Ammo btRigidBody：setDamping(linear, angular)；线性 0.45 / 角 0.55 抑制高频摆动
+          try { rb.body.setDamping(0.45, 0.55); } catch (_) {}
+          // setSleepingThresholds(linear, angular)：放宽休眠阈值，轻微抖动直接进入休眠冷却
+          try { rb.body.setSleepingThresholds(0.08, 0.12); } catch (_) {}
+          // setFriction / setRestitution：布料低恢复防止弹跳
+          try { rb.body.setFriction(0.6); } catch (_) {}
+          try { rb.body.setRestitution(0.05); } catch (_) {}
+          // 激活再强制唤醒一次，保证阻尼设置立刻生效
+          try { rb.body.activate(true); } catch (_) {}
+        }
+      } catch (_) { /* 某些 ammo 版本不支持上述 API，静默忽略即可 */ }
+    },
   }, extra || {});
 }
 // 重建 ikSolver 并同步 PARAM.ik 参数（供 playVmd 重建后调用）
@@ -395,6 +1430,49 @@ function syncIkSolverForMesh(mesh) {
     ik.minAngle = tol;
   });
   if (mmdHelper.enabled) mmdHelper.enabled.ik = ikEnabled;
+}
+// mmdHelper.add(mesh, ...) 后的统一后处理：
+// 1) 应用 Ammo 刚体阻尼/摩擦/恢复系数，抑制布料/裙摆/头发抖动；
+// 2) 对 physics.world.setGravity 实时同步 PARAMS.gravity；
+// 3) 供 playVmd / loadModel / 放置可动模型三处复用
+function tunePhysicsForMesh(mesh, { forceApplyDamping = false } = {}) {
+  if (!mmdHelper || !mesh || !mmdHelper.objects || !mmdHelper.objects.has(mesh)) return;
+  const obj = mmdHelper.objects.get(mesh);
+  const physics = obj && obj.physics;
+  if (!physics) return;
+  const gravityN = Math.max(0, Number(getParam('physics', 'gravity', 6.2)) || 0);
+  // 对 world.setGravity 尝试修改（Ammo btDiscreteDynamicsWorld）
+  try {
+    if (physics.world && physics.manager && physics.manager.allocVector3) {
+      const g = physics.manager.allocVector3();
+      g.setValue(0, -gravityN * 10, 0);
+      try { physics.world.setGravity(g); } catch (_) {}
+      physics.manager.freeVector3(g);
+    }
+  } catch (_) { /* noop */ }
+  if (!physics.bodies || !physics.manager) return;
+  const needDamping = forceApplyDamping || !physics.__dampingTuned;
+  if (!needDamping) return;
+  const mgr = physics.manager;
+  const zero = mgr.allocVector3(); zero.setValue(0, 0, 0);
+  try {
+    for (const rb of physics.bodies) {
+      if (!rb || !rb.body) continue;
+      try {
+        // 对未休眠的刚体，初始化时先清零一次速度，清除载入瞬间的残余抖动
+        rb.body.setLinearVelocity(zero);
+        rb.body.setAngularVelocity(zero);
+      } catch (_) {}
+      try { rb.body.setDamping(0.45, 0.55); } catch (_) {}
+      try { rb.body.setSleepingThresholds(0.08, 0.12); } catch (_) {}
+      try { rb.body.setFriction(0.6); } catch (_) {}
+      try { rb.body.setRestitution(0.05); } catch (_) {}
+      try { rb.body.activate(true); } catch (_) {}
+    }
+    physics.__dampingTuned = true;
+  } finally {
+    mgr.freeVector3(zero);
+  }
 }
 function loadRecent() {
   try {
@@ -425,6 +1503,10 @@ renderer.setSize(canvas.clientWidth, canvas.clientHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+// ---- 真实感渲染升级 ----
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.useLegacyLights = false; // 物理正确光照（PBR）
 
 // ---------- Post-processing: 稳定边缘抖动 + 抗锯齿 ----------
 const composer = new EffectComposer(renderer);
@@ -432,8 +1514,9 @@ const composer = new EffectComposer(renderer);
 // 先插入占位 composer；真正的 pass 顺序在 scene/camera/灯光声明之后一次性构建
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xF0F1F5);
-// 不启用雾效：场景模型（如 Stage0514）体量较大，雾会遮挡远处细节
+scene.background = new THREE.Color(0x0B0E14); // 深色 UI 同色底（无天空盒时 fallback）
+// 真实感雾效：距离渐远融入天空色，增强空间纵深感（Stage 大体量模型也保持细节可见，雾效只作用于 80 米外）
+scene.fog = new THREE.Fog(0x88AADD, 60, 180);
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
 camera.position.set(0, 2.2, 5.2);
@@ -446,58 +1529,1292 @@ controls.minDistance = 0.3;
 controls.maxDistance = 60;
 controls.update();
 
-// 灯光
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+// ---------- 天空盒（程序化渐变穹顶） ----------
+// ShaderMaterial 从地平线暖黄过渡到天顶深蓝，加入轻微日落辉光和大气散射效果
+const skyUniforms = {
+  topColor:    { value: new THREE.Color(0x1a3a6e) },   // 天顶深蓝
+  midColor:    { value: new THREE.Color(0x5a8fcf) },   // 中部淡蓝
+  bottomColor: { value: new THREE.Color(0xf5d8b8) },   // 地平线暖白（日落余辉）
+  sunDir:      { value: new THREE.Vector3(0.5, 0.35, 0.6).normalize() }, // 太阳方向
+  sunIntensity:{ value: 2.8 },
+};
+const skyVertex = `
+  varying vec3 vWorldPos;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+const skyFragment = `
+  varying vec3 vWorldPos;
+  uniform vec3 topColor;
+  uniform vec3 midColor;
+  uniform vec3 bottomColor;
+  uniform vec3 sunDir;
+  uniform float sunIntensity;
+  void main() {
+    vec3 dir = normalize(vWorldPos);
+    float h = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0); // 0=地平线 1=天顶
+    vec3 col;
+    if (h < 0.25) {
+      col = mix(bottomColor, midColor, h * 4.0);
+    } else {
+      col = mix(midColor, topColor, (h - 0.25) * 1.3333);
+    }
+    // 太阳辉光 + 霞
+    float sd = max(dot(normalize(vWorldPos), sunDir), 0.0);
+    float sun = pow(sd, 120.0) * sunIntensity;
+    float halo = pow(sd, 6.0) * 0.35;
+    vec3 sunCol = vec3(1.0, 0.95, 0.82);
+    col += sunCol * (sun + halo);
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+const skyMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(500, 64, 32),
+  new THREE.ShaderMaterial({
+    uniforms: skyUniforms,
+    vertexShader: skyVertex,
+    fragmentShader: skyFragment,
+    side: THREE.BackSide,
+    depthWrite: false,
+  })
+);
+skyMesh.renderOrder = -100; // 天空盒最先渲染
+scene.add(skyMesh);
+
+// 天空盒状态：可通过工具栏按钮切换
+// 保存雾参数：THREE.Fog 没有 enabled 属性，切换时用 null / new Fog 来开关
+const _fogParams = { color: 0x88AADD, near: 60, far: 180 };
+let skyboxEnabled = !!getParam('render', 'skyboxEnabled', true);
+skyMesh.visible = skyboxEnabled;
+if (!skyboxEnabled) scene.fog = null;
+function setSkyboxEnabled(v) {
+  skyboxEnabled = !!v;
+  skyMesh.visible = skyboxEnabled;
+  if (skyboxEnabled) {
+    scene.fog = new THREE.Fog(_fogParams.color, _fogParams.near, _fogParams.far);
+    // 开启时清除纯色背景，让穹顶 Shader 直接作为背景（renderOrder=-100 先渲染）
+    scene.background = null;
+  } else {
+    scene.fog = null;
+    // 关闭时背景用深色纯色
+    scene.background = new THREE.Color(0x0B0E14);
+  }
+  // 持久化：直接写 PARAMS + saveParams，避免 setParam 循环调用 applyParam
+  PARAMS['render.skyboxEnabled'] = skyboxEnabled;
+  try { saveParams(); } catch (_) {}
+  const btn = $('btn-toggle-skybox');
+  if (btn) {
+    btn.classList.toggle('active', skyboxEnabled);
+    btn.textContent = skyboxEnabled ? '🌤 天空盒' : '⬛ 纯色底';
+  }
+  // 同步参数面板（右侧 + 快捷浮层）
+  try { syncParamValuesFromState('render'); } catch (_) {}
+  try { syncRenderQuickPanelUI(); } catch (_) {}
+}
+setSkyboxEnabled(skyboxEnabled);
+
+// ---------- PMREM 环境光（IBL）：让 MeshStandardMaterial 有真实反射效果 ----------
+// 延迟到首帧渲染后再构建，避免 WebGL 上下文未就绪导致同步崩溃
+const pmrem = new THREE.PMREMGenerator(renderer);
+let sceneEnvMap = null;
+let _envBuilt = false;
+function buildEnvFromSky() {
+  if (_envBuilt) return;
+  _envBuilt = true;
+  try {
+    // 直接用 2D Canvas 绘制 equirectangular 天空渐变（2:1）
+    const W = 512, H = 256;
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d');
+    // 颜色：从 skyUniforms 取（与天空盒 Shader 保持一致的色调）
+    const topCol = skyUniforms.topColor.value;
+    const midCol = skyUniforms.midColor.value;
+    const botCol = skyUniforms.bottomColor.value;
+    const grd = ctx.createLinearGradient(0, H, 0, 0);
+    grd.addColorStop(0.00, `rgb(${botCol.r*255|0},${botCol.g*255|0},${botCol.b*255|0})`);
+    grd.addColorStop(0.35, `rgb(${midCol.r*255|0},${midCol.g*255|0},${midCol.b*255|0})`);
+    grd.addColorStop(0.65, `rgb(${midCol.r*255|0},${midCol.g*255|0},${midCol.b*255|0})`);
+    grd.addColorStop(1.00, `rgb(${topCol.r*255|0},${topCol.g*255|0},${topCol.b*255|0})`);
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+    // 叠加太阳辉光
+    const sunX = W * 0.72;
+    const sunY = H * 0.38;
+    const haloR = Math.max(W, H) * 0.5;
+    const halo = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, haloR);
+    halo.addColorStop(0.00, 'rgba(255,242,210,0.55)');
+    halo.addColorStop(0.08, 'rgba(255,230,180,0.28)');
+    halo.addColorStop(0.25, 'rgba(255,200,140,0.10)');
+    halo.addColorStop(1.00, 'rgba(255,180,120,0.00)');
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, W, H);
+    // 生成 PMREM：若此处抛异常会中断初始化，因此放在渲染循环首帧调用
+    const tex = new THREE.CanvasTexture(cv);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    const envRT = pmrem.fromEquirectangular(tex);
+    sceneEnvMap = envRT.texture;
+    scene.environment = sceneEnvMap;
+    tex.dispose();
+  } catch (e) {
+    // 失败静默降级：无环境光，MeshStandard 仍能工作（靠灯光漫反射）
+  }
+}
+
+// ---------- IES 纹理系统：Canvas2D 程序化生成 4 款 + 用户 PNG；LRU 4 张 ----------
+// 用 Map 做 name→tex + order 链表（简单 push/move）
+const __iesCache = { map: new Map(), order: [], max: 4 };
+function __iesDisposeOldestIfNeeded() {
+  const del = () => {
+    const oldest = __iesCache.order.shift();
+    if (!oldest) return;
+    const tex = __iesCache.map.get(oldest);
+    try { tex && tex.dispose && tex.dispose(); } catch (_) {}
+    __iesCache.map.delete(oldest);
+  };
+  while (__iesCache.order.length > __iesCache.max) del();
+}
+function __iesTouch(presetName) {
+  const i = __iesCache.order.indexOf(presetName);
+  if (i >= 0) __iesCache.order.splice(i, 1);
+  __iesCache.order.push(presetName);
+}
+// 检测 maxTextureSize：<1024 降 IES 512²，<2048 降 HDR 1024²
+let __maxTexSizeCache = -1;
+function getMaxTexSize() {
+  if (__maxTexSizeCache > 0) return __maxTexSizeCache;
+  try {
+    const gl = renderer.getContext && renderer.getContext();
+    const v = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 2048;
+    __maxTexSizeCache = Math.max(64, Number(v) || 2048);
+  } catch (_) { __maxTexSizeCache = 2048; }
+  return __maxTexSizeCache;
+}
+// 4 款内置 IES canvas
+function buildIesTexture(preset) {
+  if (__iesCache.map.has(preset)) { __iesTouch(preset); return __iesCache.map.get(preset); }
+  const mts = getMaxTexSize();
+  const SZ = mts < 1024 ? 512 : 1024;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = SZ;
+  const ctx = cv.getContext('2d');
+  const cx = SZ / 2, cy = SZ / 2, R = SZ * 0.49;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, SZ, SZ);
+  if (preset === 'softbox-round') {
+    const g = ctx.createRadialGradient(cx, cy, R * 0.1, cx, cy, R);
+    g.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+    g.addColorStop(0.35, 'rgba(255,255,255,0.92)');
+    g.addColorStop(0.75, 'rgba(255,255,255,0.38)');
+    g.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+    const vg = ctx.createRadialGradient(cx, cy, R * 0.7, cx, cy, R * 1.05);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, SZ, SZ);
+  } else if (preset === 'softbox-strip') {
+    ctx.save();
+    ctx.translate(cx, cy);
+    const grd = ctx.createRadialGradient(0, 0, R * 0.1, 0, 0, R);
+    grd.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+    grd.addColorStop(0.5, 'rgba(255,255,255,0.45)');
+    grd.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = grd;
+    ctx.scale(1.6, 0.5);
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  } else if (preset === 'grid-spot') {
+    const rings = 4;
+    for (let i = rings; i >= 1; i--) {
+      const r1 = (i - 1) * (R / rings);
+      const r2 = i * (R / rings);
+      const alpha = 0.35 + (1 - i / rings) * 0.65;
+      const g = ctx.createRadialGradient(cx, cy, r1, cx, cy, r2);
+      g.addColorStop(0.0, `rgba(255,255,255,${alpha.toFixed(3)})`);
+      g.addColorStop(0.6, `rgba(255,255,255,${(alpha * 0.65).toFixed(3)})`);
+      g.addColorStop(1.0, `rgba(255,255,255,0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(cx, cy, r2, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.save();
+    ctx.translate(cx, cy); ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    ctx.fillRect(-R, -SZ * 0.01, R * 2, SZ * 0.02);
+    ctx.rotate(Math.PI / 2);
+    ctx.fillRect(-R, -SZ * 0.01, R * 2, SZ * 0.02);
+    ctx.restore();
+  } else if (preset === 'window-blind') {
+    const stripes = 12;
+    const h = SZ / stripes;
+    for (let i = 0; i < stripes; i++) {
+      const y = i * h;
+      const topBoost = (i / stripes) < 0.3 ? 1.0 : (0.55 + 0.25 * (1 - i / stripes));
+      const g = ctx.createLinearGradient(0, y, SZ, y);
+      g.addColorStop(0.0, `rgba(255,255,255,${(0.25 * topBoost).toFixed(3)})`);
+      g.addColorStop(0.1, `rgba(255,255,255,${(0.98 * topBoost).toFixed(3)})`);
+      g.addColorStop(0.9, `rgba(255,255,255,${(0.98 * topBoost).toFixed(3)})`);
+      g.addColorStop(1.0, `rgba(255,255,255,${(0.25 * topBoost).toFixed(3)})`);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, y, SZ, h * 0.72);
+    }
+    const eg = ctx.createRadialGradient(cx, cy, R * 0.4, cx, cy, R * 1.05);
+    eg.addColorStop(0, 'rgba(0,0,0,0)');
+    eg.addColorStop(1, 'rgba(0,0,0,0.45)');
+    ctx.fillStyle = eg;
+    ctx.fillRect(0, 0, SZ, SZ);
+  } else {
+    ctx.fillStyle = '#FFF';
+    ctx.fillRect(0, 0, SZ, SZ);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  __iesCache.map.set(preset, tex);
+  __iesCache.order.push(preset);
+  __iesDisposeOldestIfNeeded();
+  return tex;
+}
+// 加载 IES：分派 preset
+let __lastIesTex = null;
+function loadIesTexture() {
+  if (typeof keyLight === 'undefined') return;
+  const preset = String(getParam('render', 'iesPreset', 'none') || 'none');
+  const userPath = String(getParam('render', 'iesUserPath', '') || '');
+  const after = (tex) => {
+    try {
+      if (__lastIesTex && __lastIesTex !== tex && (!__iesCache.map.has(__lastIesTex.__preset || ''))) {
+        try { __lastIesTex.dispose && __lastIesTex.dispose(); } catch (_) {}
+      }
+    } catch (_) {}
+    __lastIesTex = tex || null;
+    keyLight.map = tex || null;
+    if (tex) {
+      tex.colorSpace = THREE.NoColorSpace;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.needsUpdate = true;
+    }
+    keyLight.castShadow = !!getParam('render', 'keyLightEnabled', true);
+    try { keyLight.updateProjectionMatrix && keyLight.updateProjectionMatrix(); } catch (_) {}
+  };
+  if (preset === 'none') { after(null); return; }
+  const builtin = ['softbox-round','softbox-strip','grid-spot','window-blind'];
+  if (builtin.indexOf(preset) >= 0) {
+    try {
+      const tex = buildIesTexture(preset);
+      tex.__preset = preset;
+      after(tex);
+      if (window.__postfx) window.__postfx.iesCache = __iesCache;
+      return;
+    } catch (e) {
+      console.warn('[buildIesTexture] failed:', e && e.message);
+      toast('IES 光形生成失败：' + (e && e.message || '未知错误'), 'warn');
+      try { setParam('render', 'iesPreset', 'none', { persist: true, apply: false }); } catch (_) {}
+      after(null);
+      return;
+    }
+  }
+  if (preset === 'user') {
+    if (!userPath) { try { setParam('render', 'iesPreset', 'none', { persist: true, apply: false }); } catch (_) {}; after(null); return; }
+    try {
+      const abs = userPath;
+      const loader = new THREE.TextureLoader();
+      const url = (api && api.mmdUrl) ? api.mmdUrl(abs) : abs;
+      loader.load(url, (tex) => {
+        try { tex.__preset = 'user:' + abs; after(tex); } catch (_) { after(tex); }
+      }, undefined, (err) => {
+        console.warn('[loadIesTexture] user load failed:', err && err.message);
+        toast('IES 贴图加载失败：' + (err && err.message || '未知错误') + '；已关闭光形', 'warn');
+        try { setParam('render', 'iesPreset', 'none', { persist: true, apply: false }); } catch (_) {}
+        after(null);
+      });
+    } catch (e) {
+      toast('IES 贴图加载失败：' + (e && e.message || '未知错误') + '；已关闭光形', 'warn');
+      try { setParam('render', 'iesPreset', 'none', { persist: true, apply: false }); } catch (_) {}
+      after(null);
+    }
+    return;
+  }
+  after(null);
+}
+// ---------- HDR 环境贴图系统：5 款程序化 equirect + 用户 HDR/EXR ----------
+function buildProceduralHdrEquirect(preset) {
+  const mts = getMaxTexSize();
+  const W = mts < 2048 ? 1024 : 2048;
+  const H = W / 2;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const fillGradVertical = (stops) => {
+    const grd = ctx.createLinearGradient(0, H, 0, 0);
+    stops.forEach(([r, col]) => {
+      grd.addColorStop(Math.max(0, Math.min(1, 1 - r)), col);
+    });
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+  };
+  if (preset === 'studio-box') {
+    ctx.fillStyle = '#777';
+    ctx.fillRect(0, 0, W, H);
+    const grd = ctx.createLinearGradient(0, H, 0, 0);
+    grd.addColorStop(0, '#4a4a4a'); grd.addColorStop(0.5, '#858585'); grd.addColorStop(1, '#c9c9c9');
+    ctx.fillStyle = grd; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillRect(W * 0.1, H * 0.02, W * 0.8, H * 0.08);
+    const boxes = [[0.05,0.35,0.22,0.30],[0.38,0.35,0.22,0.30],[0.70,0.35,0.22,0.30]];
+    boxes.forEach(([x,y,w,h]) => {
+      const g = ctx.createRadialGradient(W*(x+w/2), H*(y+h/2), Math.min(W,H)*0.02, W*(x+w/2), H*(y+h/2), Math.min(W,H)*0.35);
+      g.addColorStop(0, 'rgba(255,255,255,0.85)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    });
+  } else if (preset === 'showroom-gray') {
+    fillGradVertical([[0, '#888a8f'], [0.5, '#bdbfc4'], [1.0, '#eceef3']]);
+  } else if (preset === 'sunset') {
+    fillGradVertical([
+      [0.00, '#8a2b18'],
+      [0.06, '#e8824a'],
+      [0.14, '#f6c38a'],
+      [0.58, '#c0d6e6'],
+      [1.00, '#2a3a5c'],
+    ]);
+    const y = H * 0.07;
+    const cx = W * 0.72;
+    const rSun = W * 0.018;
+    const haloG = ctx.createRadialGradient(cx, y, 0, cx, y, W * 0.28);
+    haloG.addColorStop(0, 'rgba(255,250,220,0.95)');
+    haloG.addColorStop(0.06, 'rgba(255,230,160,0.55)');
+    haloG.addColorStop(0.2, 'rgba(255,190,120,0.22)');
+    haloG.addColorStop(1, 'rgba(255,180,120,0)');
+    ctx.fillStyle = haloG; ctx.fillRect(0, 0, W, H);
+    ctx.beginPath(); ctx.fillStyle = '#fffbe0'; ctx.arc(cx, y, rSun, 0, Math.PI * 2); ctx.fill();
+  } else if (preset === 'neon-ring') {
+    const colHue = (h) => { const c = new THREE.Color(); c.setHSL(h, 0.95, 0.55); return c; };
+    const img = ctx.createImageData(W, H);
+    for (let y = 0; y < H; y++) {
+      const lat = (y / H) * Math.PI - Math.PI / 2;
+      const latFactor = Math.cos(lat);
+      for (let x = 0; x < W; x++) {
+        const lon = (x / W) * Math.PI * 2 - Math.PI;
+        const band = 1.0 - Math.abs(Math.sin(lat)) * 1.2;
+        const hue = (lon / (Math.PI * 2) + 1.0) % 1.0;
+        const ringCol = colHue(hue);
+        const edge = 0.12 + 0.88 * Math.max(0, band);
+        let r = ringCol.r * edge, g = ringCol.g * edge, b = ringCol.b * edge;
+        const pole = Math.pow(Math.max(0, latFactor), 1.8);
+        r *= 0.15 + 0.85 * pole; g *= 0.15 + 0.85 * pole; b *= 0.15 + 0.85 * pole;
+        const idx = (y * W + x) * 4;
+        img.data[idx + 0] = Math.max(0, Math.min(255, r * 255));
+        img.data[idx + 1] = Math.max(0, Math.min(255, g * 255));
+        img.data[idx + 2] = Math.max(0, Math.min(255, b * 255));
+        img.data[idx + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  } else if (preset === 'window-overcast') {
+    fillGradVertical([
+      [0.0, '#3d4a5a'],
+      [0.4, '#6b7a8c'],
+      [1.0, '#a8b6c6'],
+    ]);
+    const wx = W * 0.32, wy = H * 0.05, ww = W * 0.36, wh = H * 0.28;
+    const wg = ctx.createLinearGradient(wx, wy, wx, wy + wh);
+    wg.addColorStop(0, 'rgba(255,255,255,0.92)');
+    wg.addColorStop(1, 'rgba(220,230,240,0.55)');
+    ctx.fillStyle = wg; ctx.fillRect(wx, wy, ww, wh);
+    const halo = ctx.createRadialGradient(W/2, H*0.12, Math.min(W,H)*0.01, W/2, H*0.12, Math.min(W,H)*0.7);
+    halo.addColorStop(0, 'rgba(240,245,255,0.45)');
+    halo.addColorStop(1, 'rgba(240,245,255,0)');
+    ctx.fillStyle = halo; ctx.fillRect(0, 0, W, H);
+  } else {
+    fillGradVertical([[0,'#f5d8b8'],[0.35,'#5a8fcf'],[1,'#1a3a6e']]);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+// 重建 envMap：可重入 + dispose 旧对象 + 失败回退
+function rebuildEnvMap(opts = {}) {
+  const preset   = String(opts.preset || getParam('render', 'hdrPreset', 'none') || 'none');
+  const userPath = String(opts.userPath || getParam('render', 'hdrUserPath', '') || '');
+  const asBg     = typeof opts.asBg === 'boolean' ? opts.asBg : !!getParam('render', 'envMapAsBackground', false);
+  const intensity= typeof opts.intensity === 'number' ? opts.intensity : Number(getParam('render', 'envMapIntensity', 1.0) || 1.0);
+  const postfx = window.__postfx;
+  try {
+    if (postfx && postfx.envRT) { try { postfx.envRT.dispose && postfx.envRT.dispose(); } catch (_) {} }
+    if (postfx && scene.userData && scene.userData.__envTexture) {
+      try { scene.userData.__envTexture.dispose && scene.userData.__envTexture.dispose(); } catch (_) {}
+    }
+    if (postfx) { postfx.envRT = null; postfx.envRTTexture = null; }
+    scene.userData && (scene.userData.__envTexture = null);
+  } catch (_) { /* noop */ }
+  const fallbackToNone = (msg) => {
+    if (msg) { toast(msg, 'warn'); }
+    try { setParam('render', 'hdrPreset', 'none', { persist: true, apply: false }); } catch (_) {}
+    try {
+      if (preset !== 'none') {
+        rebuildEnvMap({ preset: 'none', userPath: '', asBg: false, intensity });
+      }
+    } catch (_) {}
+  };
+  const applyEnvFromTexture = (srcTex, colorSpace) => {
+    try {
+      srcTex.mapping = THREE.EquirectangularReflectionMapping;
+      if (colorSpace) srcTex.colorSpace = colorSpace;
+      srcTex.needsUpdate = true;
+      const envRT = pmrem.fromEquirectangular(srcTex);
+      const envTex = envRT.texture;
+      scene.environment = envTex;
+      sceneEnvMap = envTex;
+      if (postfx) { postfx.envRT = envRT; postfx.envRTTexture = envTex; }
+      scene.userData = scene.userData || {};
+      scene.userData.__envTexture = srcTex;
+      try { applyEnvMapIntensityToScene(intensity); } catch (_) {}
+      if (postfx) postfx.__envBgOverride = !!asBg;
+      if (asBg) {
+        scene.background = envTex;
+        try { skyMesh && (skyMesh.visible = false); } catch (_) {}
+        try {
+          if (scene.fog) {
+            const fc = new THREE.Color(String(getParam('render', 'bgColor', 0x0B0E14)));
+            const mixC = fc.clone().multiplyScalar(0.78).lerp(new THREE.Color(0x0B0E14), 0.35);
+            scene.fog.color.copy(mixC);
+          }
+        } catch (_) {}
+      } else {
+        try {
+          const sb = !!getParam('render', 'skyboxEnabled', true);
+          skyMesh.visible = sb;
+          scene.background = sb ? null : new THREE.Color(String(getParam('render', 'bgColor', 0x0B0E14)));
+          if (postfx) postfx.__envBgOverride = false;
+        } catch (_) {}
+      }
+    } catch (e) {
+      console.warn('[applyEnvFromTexture] caught:', e && e.message);
+      fallbackToNone('HDR 环境生成失败：' + (e && e.message || '未知错误') + '；已回退程序化天空');
+      srcTex && srcTex.dispose && srcTex.dispose();
+    }
+  };
+  if (preset === 'none') {
+    try {
+      const tex = buildProceduralHdrEquirect('_sky_default');
+      const mts2 = getMaxTexSize();
+      const W2 = mts2 < 2048 ? 1024 : 2048, H2 = W2 / 2;
+      const cv2 = document.createElement('canvas');
+      cv2.width = W2; cv2.height = H2;
+      const c2 = cv2.getContext('2d');
+      const topCol = skyUniforms.topColor.value, midCol = skyUniforms.midColor.value, botCol = skyUniforms.bottomColor.value;
+      const grd2 = c2.createLinearGradient(0, H2, 0, 0);
+      grd2.addColorStop(0.0, `rgb(${(botCol.r*255)|0},${(botCol.g*255)|0},${(botCol.b*255)|0})`);
+      grd2.addColorStop(0.35, `rgb(${(midCol.r*255)|0},${(midCol.g*255)|0},${(midCol.b*255)|0})`);
+      grd2.addColorStop(0.65, `rgb(${(midCol.r*255)|0},${(midCol.g*255)|0},${(midCol.b*255)|0})`);
+      grd2.addColorStop(1, `rgb(${(topCol.r*255)|0},${(topCol.g*255)|0},${(topCol.b*255)|0})`);
+      c2.fillStyle = grd2; c2.fillRect(0,0,W2,H2);
+      const sunX = W2*0.72, sunY = H2*0.38, haloR = Math.max(W2,H2)*0.5;
+      const halo = c2.createRadialGradient(sunX, sunY, 0, sunX, sunY, haloR);
+      halo.addColorStop(0,'rgba(255,242,210,0.55)'); halo.addColorStop(0.08,'rgba(255,230,180,0.28)'); halo.addColorStop(0.25,'rgba(255,200,140,0.10)'); halo.addColorStop(1,'rgba(255,180,120,0)');
+      c2.fillStyle = halo; c2.fillRect(0,0,W2,H2);
+      tex.image = cv2; tex.needsUpdate = true;
+      applyEnvFromTexture(tex, THREE.SRGBColorSpace);
+    } catch (e) {
+      console.warn('[rebuildEnvMap.none] failed:', e && e.message);
+      try { scene.environment = sceneEnvMap || null; } catch (_) {}
+    }
+    return;
+  }
+  const builtinPresets = ['studio-box','showroom-gray','sunset','neon-ring','window-overcast'];
+  if (builtinPresets.indexOf(preset) >= 0) {
+    try {
+      const tex = buildProceduralHdrEquirect(preset);
+      applyEnvFromTexture(tex, THREE.SRGBColorSpace);
+      return;
+    } catch (e) {
+      fallbackToNone('HDR 环境生成失败：' + (e && e.message || '未知错误') + '；已回退程序化天空');
+      return;
+    }
+  }
+  if (preset === 'user') {
+    if (!userPath) { fallbackToNone(); return; }
+    try {
+      const abs = userPath;
+      const url = (api && api.mmdUrl) ? api.mmdUrl(abs) : abs;
+      const rgbeLoader = new RGBELoader();
+      if (typeof rgbeLoader.setDataType === 'function') rgbeLoader.setDataType( THREE.FloatType );
+      rgbeLoader.load(url, (dataTex) => {
+        try { applyEnvFromTexture(dataTex, THREE.LinearSRGBColorSpace); }
+        catch (e2) { fallbackToNone('HDR 文件解析失败：' + (e2 && e2.message || '未知错误') + '；已回退程序化天空'); dataTex && dataTex.dispose && dataTex.dispose(); }
+      }, undefined, (err) => {
+        fallbackToNone('HDR 文件加载失败：' + (err && err.message || '未知错误') + '；已回退程序化天空');
+      });
+    } catch (e) {
+      fallbackToNone('HDR 文件加载失败：' + (e && e.message || '未知错误') + '；已回退程序化天空');
+    }
+    return;
+  }
+  try { preset !== 'none' && fallbackToNone(); } catch (_) {}
+}
+// envMapIntensity 同步：遍历所有材质，幂等跳过
+function applyEnvMapIntensityToScene(v) {
+  const postfx = window.__postfx;
+  const val = Number(v);
+  if (postfx) {
+    const last = postfx.__lastEnvMapIntensity;
+    if (typeof last === 'number' && Math.abs(last - val) < 1e-4) return;
+    postfx.__lastEnvMapIntensity = val;
+  }
+  if (!scene || !scene.traverse) return;
+  scene.traverse((o) => {
+    try {
+      if (!o || !o.isMesh) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach((m) => {
+        if (!m) return;
+        if (typeof m.envMapIntensity !== 'undefined') {
+          m.envMapIntensity = val;
+          m.needsUpdate = true;
+        }
+      });
+    } catch (_) {}
+  });
+}
+// ---------- ensureXxx Pass：懒创建 + 幂等 + 失败降级 ----------
+function ensureColorBalancePass() {
+  const postfx = window.__postfx;
+  if (!postfx) return;
+  if (postfx.colorBalancePass && postfx.composer.passes.indexOf(postfx.colorBalancePass) >= 0) return;
+  try {
+    const np = new ShaderPass(ColorBalanceShader);
+    postfx.colorBalancePass = np;
+    const arr = postfx.composer.passes;
+    const iBloom = arr.indexOf(postfx.bloomPass);
+    const iFxaa = arr.indexOf(postfx.fxaaPass);
+    const insertAt = iBloom >= 0 ? iBloom + 1 : (iFxaa >= 0 ? iFxaa : arr.length - 1);
+    arr.splice(insertAt, 0, np);
+    try {
+      const vp = document.getElementById('viewport');
+      const w = vp ? vp.clientWidth : (canvas.clientWidth || 1);
+      const h = vp ? vp.clientHeight : (canvas.clientHeight || 1);
+      if (w > 0 && h > 0) postfx.composer.setSize(w, h);
+    } catch (_) {}
+    const u = np.uniforms;
+    const gain = colorTempTintToWBGain(Number(getParam('render','colorTemp',5800))||5800, Number(getParam('render','colorTint',0))||0);
+    u.uWBGain.value.set(gain[0], gain[1], gain[2]);
+    u.uContrast.value   = Math.max(0.5, Math.min(1.6, Number(getParam('render','contrast',1.05))||1.0));
+    u.uSaturation.value = Math.max(0,   Math.min(1.6, Number(getParam('render','saturation',1.0))||0));
+    u.uVibrance.value   = Math.max(0,   Math.min(1.6, Number(getParam('render','vibrance',1.1))||0));
+    const lgg = Array.isArray(getParam('render','liftGammaGain')) ? getParam('render','liftGammaGain') : [0,1,1];
+    u.uLift.value = Math.max(-0.3, Math.min(0.3, Number(lgg[0])||0));
+    u.uGamma.value = Math.max(0.3,  Math.min(2.5, Number(lgg[1])||1));
+    u.uGain.value = Math.max(0.3,  Math.min(2.5, Number(lgg[2])||1));
+    np.enabled = !!getParam('render','colorBalanceEnabled', true);
+  } catch (e) {
+    console.warn('[ensureColorBalancePass] failed:', e && e.message);
+    try { toast('色彩通道 Shader 编译失败；已关闭色彩后处理', 'warn'); } catch (_) {}
+    try { setParam('render','colorBalanceEnabled',false,{persist:true,apply:false}); } catch (_) {}
+    postfx.colorBalancePass = null;
+  }
+}
+function ensureAoMode(mode) {
+  const postfx = window.__postfx;
+  if (!postfx || !postfx.composer) return;
+  const arr = postfx.composer.passes;
+  const removable = [];
+  arr.forEach((p, i) => {
+    if (p === postfx.saoPass || p === postfx.ssgiPass) removable.push([i, p]);
+  });
+  removable.reverse().forEach(([i, p]) => {
+    try { p.dispose && p.dispose(); } catch (_) {}
+    arr.splice(i, 1);
+  });
+  if (postfx.saoPass === postfx.ssgiPass) { postfx.saoPass = null; }
+  postfx.saoPass = null;
+  postfx.ssgiPass = null;
+  const anchor = arr.indexOf(postfx.contactShadowsPass);
+  const insertAt = anchor >= 0 ? anchor + 1 : Math.min(2, Math.max(1, arr.length - 6));
+  const doResize = () => {
+    try {
+      const vp = document.getElementById('viewport');
+      const w = vp ? vp.clientWidth : (canvas.clientWidth || 1);
+      const h = vp ? vp.clientHeight : (canvas.clientHeight || 1);
+      if (w > 0 && h > 0) {
+        postfx.composer.setSize(w, h);
+        try { postfx.composer.setPixelRatio(renderer.getPixelRatio()); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  if (mode === 'off') { doResize(); return; }
+  if (mode === 'ssgi') {
+    try {
+      if (typeof window.__FakeSSGIPass !== 'function') throw new Error('SSGI 未启用：已将 SSGI 视为可选后处理，你的当前版本 three 未内置 SSGIPass；自动回退 SSAO');
+      const np = new window.__FakeSSGIPass(scene, camera);
+      postfx.ssgiPass = np;
+      const write = (k, v) => { try { if (k in np) np[k] = v; } catch (_) {} try { if (np.params && (k in np.params)) np.params[k] = v; } catch (_) {} };
+      write('radius',       Number(getParam('render','ssgiRadius',0.18)) || 0.18);
+      write('thickness',    Number(getParam('render','ssgiThickness',0.015)) || 0.015);
+      write('maxRoughness', Number(getParam('render','ssgiMaxRoughness',0.9)) || 0.9);
+      write('intensity',    Number(getParam('render','ssgiIntensity',1.0)) || 1.0);
+      try { typeof np.updateSSGIMaterial === 'function' && np.updateSSGIMaterial(); } catch (_) {}
+      arr.splice(insertAt, 0, np);
+      doResize();
+      if (!getParam('render','ssgiEnabled',false)) {
+        try { setParam('render','ssgiEnabled', true, { persist: true, apply: false }); } catch (_) {}
+      }
+    } catch (e) {
+      console.warn('[ensureAoMode.ssgi] failed:', e && e.message);
+      try { toast('你的 GPU 不支持 SSGI（浮点/线性过滤扩展缺失）；已自动回退 SSAO', 'warn'); } catch (_) {}
+      try { setParam('render','aoMode','ssao', { persist: true, apply: false }); } catch (_) {}
+      try { setParam('render','ssgiEnabled', false, { persist: true, apply: false }); } catch (_) {}
+      try { ensureAoMode('ssao'); } catch (_) {}
+    }
+    return;
+  }
+  try {
+    const np = new SAOPass(scene, camera, false, true);
+    postfx.saoPass = np;
+    np.params.intensity = Number(getParam('render','ssaoIntensity',0.75)) || 0;
+    np.params.radius    = Number(getParam('render','ssaoRadius',8)) || 0;
+    np.params.saoScale  = 1.0;
+    np.params.saoBias   = 0.1;
+    np.params.saoIntensity = 0.95;
+    np.enabled = !!getParam('render','ssaoEnabled', false);
+    arr.splice(insertAt, 0, np);
+    doResize();
+  } catch (e) {
+    console.warn('[ensureAoMode.ssao] failed:', e && e.message);
+    try { toast('SSAO 创建失败：' + (e && e.message || '未知错误'), 'warn'); } catch (_) {}
+    postfx.saoPass = null;
+  }
+}
+function ensureGodRayPass(enable) {
+  const postfx = window.__postfx;
+  if (!postfx || !postfx.composer) return;
+  const arr = postfx.composer.passes;
+  if (enable && postfx.godRayPass) { postfx.godRayPass.enabled = true; return; }
+  if (!enable && postfx.godRayPass) { postfx.godRayPass.enabled = false; return; }
+  if (enable && !postfx.godRayPass) {
+    try {
+      const np = new ShaderPass(GodRayShader);
+      np.enabled = true;
+      const u = np.uniforms;
+      u.tDepth.value = postfx.depthTexture || null;
+      const vp = document.getElementById('viewport');
+      const w = vp ? vp.clientWidth : (canvas.clientWidth || 1);
+      const h = vp ? vp.clientHeight : (canvas.clientHeight || 1);
+      u.uResolution.value.set(Math.max(1,w), Math.max(1,h));
+      u.uCameraNear.value = camera.near;
+      u.uCameraFar.value  = camera.far;
+      u.uIntensity.value = Number(getParam('render','godRayIntensity',0.85))||0;
+      u.uDecay.value     = Number(getParam('render','godRayDecay',0.955))||0.95;
+      u.uWeight.value    = Number(getParam('render','godRayWeight',0.35))||0.35;
+      u.uSamples.value   = Math.max(8, Math.min(128, Math.floor(Number(getParam('render','godRaySamples',32))||32)));
+      const after1 = postfx.ssgiPass ? arr.indexOf(postfx.ssgiPass) : arr.indexOf(postfx.saoPass);
+      const after2 = arr.indexOf(postfx.outlinePass);
+      const anchor = Math.max(after1, after2);
+      let insertAt = anchor >= 0 ? anchor + 1 : arr.length - 3;
+      if (postfx.lensFlarePass) {
+        const iLens = arr.indexOf(postfx.lensFlarePass);
+        if (iLens >= 0 && insertAt > iLens) insertAt = iLens;
+      }
+      const iBloom = arr.indexOf(postfx.bloomPass);
+      if (iBloom >= 0 && insertAt > iBloom) insertAt = iBloom;
+      arr.splice(insertAt, 0, np);
+      postfx.godRayPass = np;
+      try { if (w>0 && h>0) postfx.composer.setSize(w, h); } catch (_) {}
+    } catch (e) {
+      console.warn('[ensureGodRayPass] failed:', e && e.message);
+      try { toast('体积光 Shader 编译失败；已自动关闭', 'warn'); } catch (_) {}
+      try { setParam('render','godRayEnabled',false,{persist:true,apply:false}); } catch (_) {}
+      postfx.godRayPass = null;
+    }
+  }
+}
+function ensureLensFlarePass(enable) {
+  const postfx = window.__postfx;
+  if (!postfx || !postfx.composer) return;
+  const arr = postfx.composer.passes;
+  if (enable && postfx.lensFlarePass) { postfx.lensFlarePass.enabled = true; return; }
+  if (!enable && postfx.lensFlarePass) { postfx.lensFlarePass.enabled = false; return; }
+  if (enable && !postfx.lensFlarePass) {
+    try {
+      const np = new ShaderPass(LensFlareShader);
+      np.enabled = true;
+      const u = np.uniforms;
+      u.tDepth.value = postfx.depthTexture || null;
+      const vp = document.getElementById('viewport');
+      const w = vp ? vp.clientWidth : (canvas.clientWidth || 1);
+      const h = vp ? vp.clientHeight : (canvas.clientHeight || 1);
+      u.uResolution.value.set(Math.max(1,w), Math.max(1,h));
+      u.uCameraNear.value = camera.near;
+      u.uCameraFar.value  = camera.far;
+      u.uIntensity.value = Number(getParam('render','lensFlareIntensity',0.7))||0;
+      u.uThreshold.value = Math.max(0.1, Math.min(1, Number(getParam('render','lensFlareThreshold',0.9))||0.9));
+      u.uGhosts.value    = Math.max(1, Math.min(12, Math.floor(Number(getParam('render','lensFlareGhosts',6))||6)));
+      u.uChromatic.value = Math.max(0, Math.min(0.3, Number(getParam('render','lensFlareChromatic',0.08))||0.08));
+      const iGod = postfx.godRayPass ? arr.indexOf(postfx.godRayPass) : -1;
+      const iBloom = arr.indexOf(postfx.bloomPass);
+      let insertAt = iGod >= 0 ? iGod + 1 : (arr.indexOf(postfx.outlinePass) + 1);
+      if (iBloom >= 0 && insertAt > iBloom) insertAt = iBloom;
+      arr.splice(insertAt, 0, np);
+      postfx.lensFlarePass = np;
+      try { if (w>0 && h>0) postfx.composer.setSize(w, h); } catch (_) {}
+    } catch (e) {
+      console.warn('[ensureLensFlarePass] failed:', e && e.message);
+      try { toast('镜头光晕 Shader 编译失败；已自动关闭', 'warn'); } catch (_) {}
+      try { setParam('render','lensFlareEnabled',false,{persist:true,apply:false}); } catch (_) {}
+      postfx.lensFlarePass = null;
+    }
+  }
+}
+// ---------- CHIP 汇总 chip：按 5 类生成缩写串 + hover tooltip 完整清单 ----------
+let __lastChipText = '';
+function updateRqpChip() {
+  const chip = $('rqp-chip');
+  const tip  = $('rqp-tooltip');
+  if (!chip) return;
+  try {
+    const tm  = String(getParam('render','toneMapping','agx')||'agx').toUpperCase().slice(0,3);
+    const ct  = Math.round((Number(getParam('render','colorTemp',5800))||5800)/1000);
+    const pn  = String(getParam('render','presetName','default')||'default');
+    const presCN = { default:'默认',film:'电影',natural:'自然',studio:'工作室',rembrandt:'伦勃朗',butterfly:'蝴蝶光',backlit:'剪影',coldnight:'冷夜',neon:'霓虹',custom:'自定义' };
+    const pnCN = presCN[pn] || (pn && pn[0]);
+    const hdr = String(getParam('render','hdrPreset','none')||'none');
+    const hdrMap = { none:'N','studio-box':'棚','showroom-gray':'展','sunset':'日落','neon-ring':'霓虹','window-overcast':'窗阴','user':'U' };
+    const ies = String(getParam('render','iesPreset','none')||'none');
+    const iesMap = { none:'无','softbox-round':'SBR','softbox-strip':'SBS','grid-spot':'GS','window-blind':'WB','user':'U' };
+    const sMap = { none:'N',basic:'B',pcfsoft:'P',vsm:'V' };
+    const sType = sMap[String(getParam('render','shadowMapType','vsm')||'vsm')] || '?';
+    const csOn = !!getParam('render','contactShadowsEnabled',true);
+    const ao = String(getParam('render','aoMode','ssao')||'ssao');
+    const aoCode = ao==='off'?'O':(ao==='ssgi'?'G':'S');
+    const gr = !!getParam('render','godRayEnabled',false) ? 'GR+' : '';
+    const lf = !!getParam('render','lensFlareEnabled',false) ? 'LF+' : '';
+    const bSt = Math.round((Number(getParam('render','bloomStrength',0.42))||0.42) * 100) / 100;
+    const line1 = `${tm}·T${ct}K`;
+    const line2 = pnCN;
+    const line3 = (hdrMap[hdr]||'N') + '·' + (iesMap[ies]||'无');
+    const line4 = `${csOn?'CS':''}${aoCode}${gr}${lf}B${bSt}`;
+    const line5 = sType;
+    const short = `🎯 ${line1}｜${line2}｜${line3}｜${line4}｜${line5}影`;
+    if (short === __lastChipText) { return; }
+    __lastChipText = short;
+    chip.textContent = short;
+    const tipHtml = [
+      `🎨 色彩通道：${tm} (${getParam('render','toneMapping','agx')}) + 色温 ${getParam('render','colorTemp',5800)}K + 对比 ${(Number(getParam('render','contrast',1.05))||1.05).toFixed(2)} + vibrance ${(Number(getParam('render','vibrance',1.1))||1.1).toFixed(2)}`,
+      `🎬 布光：${_PRESETS[pn]&&_PRESETS[pn].label?_PRESETS[pn].label:pnCN} (dir ${(Number(getParam('render','dirIntensity',3))||3).toFixed(1)}; key ${(Number(getParam('render','keyLightIntensity',6))||6).toFixed(1)} @ ${getParam('render','keyLightHeight',30)}°H ${getParam('render','keyLightAzimuth',45)}°A)`,
+      `💡 光源：HDR=${hdr}; IES=${ies}`,
+      `🌫 特效：接触阴影=${csOn?'开':'关'}; AO=${ao}; 体积光=${getParam('render','godRayEnabled',false)?'开':'关'}; 光晕=${getParam('render','lensFlareEnabled',false)?'开':'关'}; Bloom=${bSt}`,
+      `🖼 阴影：${String(getParam('render','shadowMapType','vsm'))}; SSAO=${getParam('render','ssaoEnabled',false)?'开':'关'}; SSGI=${getParam('render','ssgiEnabled',false)?'开':'关'}`,
+    ].join('\n');
+    chip.setAttribute('title', tipHtml);
+    if (tip) { tip.textContent = tipHtml; }
+  } catch (_) { /* noop */ }
+}
+// ---------- 手风琴 5 分组（render 组）：切换逻辑 + 状态持久化 ----------
+function accordionRenderToggle(id) {
+  const container = document.querySelector('#params-render .accordion-root');
+  if (!container) return;
+  try {
+    const groups = container.querySelectorAll('.render-accordion-group');
+    groups.forEach((g) => {
+      const on = g.dataset.group === String(id || '');
+      g.classList.toggle('expanded', !!on);
+    });
+    const state = {};
+    groups.forEach((g) => { state[String(g.dataset.group || '')] = !!g.classList.contains('expanded'); });
+    try { setParam('render','renderAccordionState', JSON.stringify(state), { persist: true, apply: false }); } catch (_) {}
+  } catch (_) { /* noop */ }
+}
+window.accordionRenderToggle = accordionRenderToggle;
+// 5 分组：参数 key → 分组归属表
+const RENDER_ACCORDION_SECTIONS = {
+  color:   ['toneMapping','toneMappingExposure','colorBalanceEnabled','colorTemp','colorTint','contrast','saturation','vibrance','liftGammaGain','bgColor'],
+  preset:  ['renderPreset','presetName'],
+  light:   [
+    'hardLightMode','ambientIntensity','hemiIntensity','dirIntensity','dirAngle','dirHeight','fillIntensity','fillLightColor','dirLightColor',
+    'keyLightEnabled','keyLightIntensity','keyLightAngle','keyLightHeight','keyLightAzimuth','keyLightDistance','keyLightPenumbra','keyLightColor',
+    'rimLightEnabled','rimLightIntensity','rimLightColor','rimLightAzimuth','rimLightHeight',
+    'iesPreset','iesUserPath','iesIntensityScale',
+    'hdrPreset','hdrUserPath','envMapAsBackground','envMapIntensity','skyboxEnabled',
+    'gridVisible','shadowEnabled',
+  ],
+  effects: [
+    'outlineEnabled','edgeStrength','edgeThickness','edgeColor','fxaaEnabled','pixelRatioMax',
+    'bloomEnabled','bloomStrength','bloomThreshold','bloomRadius',
+    'contactShadowsEnabled','contactShadowsOpacity','contactShadowsDistance',
+    'aoMode','ssaoEnabled','ssaoIntensity','ssaoRadius','ssgiEnabled','ssgiRadius','ssgiThickness','ssgiMaxRoughness','ssgiIntensity',
+    'godRayEnabled','godRayIntensity','godRayDecay','godRayWeight','godRaySamples','godRaySource',
+    'lensFlareEnabled','lensFlareIntensity','lensFlareThreshold','lensFlareGhosts','lensFlareChromatic',
+  ],
+  shadow: [
+    'shadowMapType','shadowSoftness','shadowBiasScale','shadowMapResK','vsmBlurRadius',
+    'fresnelRimEnabled','fresnelRimColor','fresnelRimPower','fresnelRimIntensity',
+    'shaderBevelEnabled','shaderBevelStrength',
+  ],
+};
+const RENDER_ACCORDION_KEY_2_SECTION = (() => {
+  const map = {};
+  Object.keys(RENDER_ACCORDION_SECTIONS).forEach((s) => {
+    RENDER_ACCORDION_SECTIONS[s].forEach((k) => { map[k] = s; });
+  });
+  return map;
+})();
+
+// 灯光（物理正确光照模式下数值重新校准）
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.35);
 scene.add(ambientLight);
-const hemisphereLight = new THREE.HemisphereLight(0xEAF1FF, 0xE2E8F0, 0.55);
+const hemisphereLight = new THREE.HemisphereLight(0xBFD6FF, 0x3a2e24, 0.6);
 scene.add(hemisphereLight);
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-dirLight.position.set(3, 6, 4);
+const dirLight = new THREE.DirectionalLight(0xFFF1DC, 3.2);
+dirLight.position.set(5, 8, 6);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.set(2048, 2048);
 dirLight.shadow.camera.near = 0.5;
-dirLight.shadow.camera.far = 40;
-dirLight.shadow.camera.left = -8;
-dirLight.shadow.camera.right = 8;
-dirLight.shadow.camera.top = 8;
-dirLight.shadow.camera.bottom = -8;
+dirLight.shadow.camera.far = 50;
+dirLight.shadow.camera.left = -10;
+dirLight.shadow.camera.right = 10;
+dirLight.shadow.camera.top = 10;
+dirLight.shadow.camera.bottom = -10;
+dirLight.shadow.bias = -0.0005;
+dirLight.shadow.normalBias = 0.02;
+dirLight.shadow.radius = 3;
 scene.add(dirLight);
-const fillLight = new THREE.DirectionalLight(0x8FB0FF, 0.30);
-fillLight.position.set(-3, 2, -4);
+const fillLight = new THREE.DirectionalLight(0x6F86B8, 0.6);
+fillLight.position.set(-4, 3, -5);
 scene.add(fillLight);
+// 轮廓光（rim light）：从背面上方打暖色光，突出发丝/轮廓边缘
+const rimLight = new THREE.DirectionalLight(0xFFC890, 1.1);
+rimLight.position.set(-3, 5, -6);
+scene.add(rimLight);
+// ---------- 聚光灯 Key Light（三点布光的主光）----------
+// 位置：右上前方约 45° 瞄准角色胸部（target=0,1.1,0），有圆锥角+半影，立体感优于方向光
+const keyLight = new THREE.SpotLight(0xFFE8BF, 6.0);
+keyLight.position.set(4.5, 6.5, 5.2);
+keyLight.target.position.set(0, 1.1, 0);
+keyLight.angle = Math.PI / 180 * 32;    // 圆锥角 32°
+keyLight.penumbra = 0.35;                // 柔边半影
+keyLight.distance = 0;                    // 无限距离
+keyLight.decay = 1.5;                     // 距离衰减
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(2048, 2048);
+keyLight.shadow.camera.near = 1;
+keyLight.shadow.camera.far = 40;
+keyLight.shadow.bias = -0.00015;
+keyLight.shadow.normalBias = 0.015;
+keyLight.shadow.radius = 1;
+scene.add(keyLight);
+scene.add(keyLight.target);
+
+// ---------- 3 款 ShaderPass 常量：ColorBalance / GodRay / LensFlare（字符串，不新增 npm 依赖）----------
+const FSVT = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+// 色彩通道：白平衡 gain(线性) + lift/gamma/gain + contrast + saturation/vibrance
+const ColorBalanceShader = {
+  name: 'ColorBalancePass',
+  uniforms: {
+    tDiffuse:   { value: null },
+    uWBGain:    { value: new THREE.Vector3(1, 1, 1) },
+    uContrast:  { value: 1.05 },
+    uSaturation:{ value: 1.0 },
+    uVibrance:  { value: 1.1 },
+    uLift:      { value: 0.0 },
+    uGamma:     { value: 1.0 },
+    uGain:      { value: 1.0 },
+  },
+  vertexShader: FSVT,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform vec3  uWBGain;
+    uniform float uContrast;
+    uniform float uSaturation;
+    uniform float uVibrance;
+    uniform float uLift;
+    uniform float uGamma;
+    uniform float uGain;
+    varying vec2 vUv;
+    float _luma(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+    void main() {
+      vec4 tc = texture2D(tDiffuse, vUv);
+      vec3 c = tc.rgb;
+      // 1) 白平衡（线性 HDR 空间）
+      c *= uWBGain;
+      // 2) lift/gamma/gain：结合律合并为一次乘+加+pow
+      c = (c + uLift);
+      c = pow(max(c, vec3(1e-5)), vec3(1.0 / max(uGamma, 0.01))) * uGain;
+      // 3) contrast：围绕 0.5 线性灰（线性空间中点近似 0.18，这里用 0.5 视觉上稳定、与 UI 滑块一致）
+      c = (c - 0.5) * uContrast + 0.5;
+      // 4) saturation + vibrance
+      float luma = max(_luma(c), 0.0);
+      vec3 satMix = mix(vec3(luma), c, uSaturation);
+      // vibrance：抬升不饱和像素（饱和度越低，提升越多）
+      float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+      float vAmt = (1.0 - smoothstep(0.0, 0.5, sat)) * (uVibrance - 1.0);
+      vec3 vibMix = satMix + (satMix - vec3(luma)) * vAmt;
+      gl_FragColor = vec4(vibMix, tc.a);
+    }
+  `,
+};
+// 体积光（God Ray）：径向 32 步采样 + 深度遮挡
+const GodRayShader = {
+  name: 'GodRayPass',
+  uniforms: {
+    tDiffuse:         { value: null },
+    tDepth:           { value: null },
+    uResolution:      { value: new THREE.Vector2(1, 1) },
+    uScreenLightPos:  { value: new THREE.Vector2(0.5, 0.75) },
+    uIntensity:       { value: 0.85 },
+    uDecay:           { value: 0.955 },
+    uWeight:          { value: 0.35 },
+    uSamples:         { value: 32 },
+    uCameraNear:      { value: 0.1 },
+    uCameraFar:       { value: 1000.0 },
+  },
+  vertexShader: FSVT,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform sampler2D tDepth;
+    uniform vec2  uResolution;
+    uniform vec2  uScreenLightPos;
+    uniform float uIntensity;
+    uniform float uDecay;
+    uniform float uWeight;
+    uniform int   uSamples;
+    uniform float uCameraNear;
+    uniform float uCameraFar;
+    varying vec2 vUv;
+    float linearizeDepth(vec2 uv){
+      float z = texture2D(tDepth, uv).x * 2.0 - 1.0;
+      return (2.0 * uCameraNear * uCameraFar) / (uCameraFar + uCameraNear - z * (uCameraFar - uCameraNear));
+    }
+    void main(){
+      vec4 col = texture2D(tDiffuse, vUv);
+      vec2 lp = clamp(uScreenLightPos, vec2(-0.2), vec2(1.2));
+      bool lightBehind = (lp.x < 0.0 || lp.x > 1.0 || lp.y < 0.0 || lp.y > 1.0);
+      // 光源点遮挡检测：若光源在屏幕内且被前景挡住，体积光整体压暗
+      float occ = 1.0;
+      if (!lightBehind) {
+        vec2 cl = clamp(lp, vec2(0.001), vec2(0.999));
+        float dL = linearizeDepth(cl);
+        // 若 depth < (cameraFar * 0.99) 表示光源点处有前景，遮挡
+        occ = smoothstep(uCameraFar * 0.6, uCameraFar * 0.995, dL);
+      }
+      if (uIntensity <= 0.001 || occ <= 0.001) { gl_FragColor = col; return; }
+      vec2 dUv = (vUv - lp) * (1.0 / float(max(4, uSamples)));
+      vec2 cuv = vUv;
+      float weight = 1.0;
+      vec3 accum = vec3(0.0);
+      // 最多 128 步，避免 uniform 误用
+      const int MAX_S = 128;
+      for (int i = 0; i < MAX_S; i++) {
+        if (i >= uSamples) break;
+        cuv -= dUv;
+        if (cuv.x < 0.0 || cuv.x > 1.0 || cuv.y < 0.0 || cuv.y > 1.0) continue;
+        vec3 s = texture2D(tDiffuse, cuv).rgb;
+        // brightPass：只取高亮度贡献
+        float bm = max(max(s.r, s.g), s.b) - 0.75;
+        vec3 bright = max(vec3(bm), vec3(0.0));
+        accum += bright * weight * uWeight;
+        weight *= uDecay;
+      }
+      gl_FragColor = vec4(col.rgb + accum * uIntensity * occ, col.a);
+    }
+  `,
+};
+// 镜头光晕：brightPass → 6 层鬼影 + chromatic + 自动遮挡
+const LensFlareShader = {
+  name: 'LensFlarePass',
+  uniforms: {
+    tDiffuse:         { value: null },
+    tDepth:           { value: null },
+    uResolution:      { value: new THREE.Vector2(1, 1) },
+    uScreenLightPos:  { value: new THREE.Vector2(0.5, 0.75) },
+    uIntensity:       { value: 0.7 },
+    uThreshold:       { value: 0.9 },
+    uGhosts:          { value: 6 },
+    uChromatic:       { value: 0.08 },
+    uCameraNear:      { value: 0.1 },
+    uCameraFar:       { value: 1000.0 },
+  },
+  vertexShader: FSVT,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform sampler2D tDepth;
+    uniform vec2  uResolution;
+    uniform vec2  uScreenLightPos;
+    uniform float uIntensity;
+    uniform float uThreshold;
+    uniform int   uGhosts;
+    uniform float uChromatic;
+    uniform float uCameraNear;
+    uniform float uCameraFar;
+    varying vec2 vUv;
+    float linearizeDepth(vec2 uv){
+      float z = texture2D(tDepth, uv).x * 2.0 - 1.0;
+      return (2.0 * uCameraNear * uCameraFar) / (uCameraFar + uCameraNear - z * (uCameraFar - uCameraNear));
+    }
+    vec3 sampleGhosts(vec2 uv, vec2 lp, vec2 dirCenter, int count, float chroma){
+      vec3 acc = vec3(0.0);
+      const int MAX_G = 16;
+      for (int i = 0; i < MAX_G; i++) {
+        if (i >= count) break;
+        float t = float(i + 1) / float(max(1, count));
+        // 距离中心越远，层级越弱
+        float fade = 1.0 - smoothstep(0.2, 1.0, t);
+        // RGB 三个通道的 ghost 位置略偏移 -> 彩边色散
+        vec2 pR = lp + dirCenter * (t * 1.1) * (1.0 + chroma * 0.5);
+        vec2 pG = lp + dirCenter * (t * 1.0);
+        vec2 pB = lp + dirCenter * (t * 0.9) * (1.0 - chroma * 0.5);
+        // 通过屏幕中心反射
+        pR = (vec2(0.5) - (pR - vec2(0.5)));
+        pG = (vec2(0.5) - (pG - vec2(0.5)));
+        pB = (vec2(0.5) - (pB - vec2(0.5)));
+        float r = texture2D(tDiffuse, pR).r;
+        float g = texture2D(tDiffuse, pG).g;
+        float b = texture2D(tDiffuse, pB).b;
+        float brightR = max(r - uThreshold, 0.0);
+        float brightG = max(g - uThreshold, 0.0);
+        float brightB = max(b - uThreshold, 0.0);
+        acc += vec3(brightR, brightG, brightB) * fade;
+      }
+      return acc;
+    }
+    void main(){
+      vec4 col = texture2D(tDiffuse, vUv);
+      vec2 lp = clamp(uScreenLightPos, vec2(-0.2), vec2(1.2));
+      // 遮挡检测（光源屏幕内才做）
+      float occ = 1.0;
+      bool inScreen = (lp.x >= 0.0 && lp.x <= 1.0 && lp.y >= 0.0 && lp.y <= 1.0);
+      if (inScreen) {
+        vec2 cl = clamp(lp, vec2(0.001), vec2(0.999));
+        float dL = linearizeDepth(cl);
+        occ = smoothstep(uCameraFar * 0.55, uCameraFar * 0.995, dL);
+      } else {
+        // 光源在屏幕外：允许一部分光晕（沿屏幕边缘），但强度减半
+        occ = 0.45;
+      }
+      if (uIntensity <= 0.001 || occ <= 0.001) { gl_FragColor = col; return; }
+      vec2 dirCenter = lp - vec2(0.5);
+      // 1) 主光晕 halo：在 lp 附近径向采样 bright
+      vec2 haloDUv = (vUv - lp);
+      float haloD = length(haloDUv);
+      float halo = exp(-haloD * 4.5) * 0.6 + exp(-haloD * 14.0) * 1.2;
+      // brightPass halo color：采 lp 颜色
+      vec2 clp = clamp(lp, vec2(0.001), vec2(0.999));
+      vec3 lc = texture2D(tDiffuse, clp).rgb;
+      float lcb = max(max(lc.r, lc.g), lc.b) - uThreshold;
+      vec3 haloCol = lc * max(lcb, 0.0) * halo;
+      // 2) 多层鬼影
+      vec3 ghosts = sampleGhosts(vUv, lp, dirCenter, uGhosts, uChromatic);
+      vec3 flare = (haloCol + ghosts * 0.55) * uIntensity * occ;
+      gl_FragColor = vec4(col.rgb + flare, col.a);
+    }
+  `,
+};
 
 // ---------- 正式构建后处理管线（scene/camera/灯光均已就绪） ----------
+// 《设计》§1 严格顺序：
+//  ① RenderPass (颜色+深度)
+//  ② ContactShadowsShaderPass   （屏幕空间接触阴影，紧邻主色，不要被 AO 再叠加）
+//  ③ SAOPass | SSGIPass          （二选一，由 aoMode 控制；默认先插入 saoPass，ensureAoMode 可替换成 SSGI）
+//  ④ OutlinePass                 （稳定边缘：描边在 AO 之后，不被 AO 压暗）
+//  ⑤ GodRayPass [可选，占位，默认关闭；ensureGodRayPass 再启用]
+//  ⑥ LensFlarePass [可选，占位，默认关闭]
+//  ⑦ UnrealBloomPass             （Bloom 最后再叠加，GodRay/Lens 的高亮度也会泛光）
+//  ⑧ ColorBalancePass            （线性 HDR 空间做色彩校正 → 在 toneMapping 之前）
+//  ⑨ FXAAShaderPass              （抗锯齿：作用在 tonemap 之前、色彩校正之后）
+//  ⑩ OutputPass                  （负责 sRGB output、color space 变换）
+const resolution = new THREE.Vector2(Math.max(1, canvas.clientWidth || 1), Math.max(1, canvas.clientHeight || 1));
 composer.passes = [];
+// ① RenderPass：真实挂 DepthTexture，并把 tDepth 同步给 ContactShadows / GodRay / LensFlare
 const renderPassFinal = new RenderPass(scene, camera);
+const depthTexture = new THREE.DepthTexture(Math.max(1, resolution.x), Math.max(1, resolution.y));
+depthTexture.type = THREE.UnsignedShortType;
+depthTexture.format = THREE.DepthFormat;
+depthTexture.minFilter = THREE.NearestFilter;
+depthTexture.magFilter = THREE.NearestFilter;
+renderPassFinal.clear = true;
+renderPassFinal.depthTexture = depthTexture;
+renderPassFinal.depthBuffer = true;
 composer.addPass(renderPassFinal);
-const resolution = new THREE.Vector2(canvas.clientWidth || 1, canvas.clientHeight || 1);
+// ② ContactShadows：接触阴影 ShaderPass，必须紧随主色后
+const contactShadowsPass = new ShaderPass(ContactShadowsShader);
+contactShadowsPass.enabled = !!getParam('render', 'contactShadowsEnabled', true);
+contactShadowsPass.uniforms.tDepth.value = depthTexture;
+contactShadowsPass.uniforms.resolution.value.set(
+  Math.max(1, resolution.x * renderer.getPixelRatio()),
+  Math.max(1, resolution.y * renderer.getPixelRatio())
+);
+contactShadowsPass.uniforms.cameraNear.value = camera.near;
+contactShadowsPass.uniforms.cameraFar.value  = camera.far;
+contactShadowsPass.uniforms.opacity.value     = Number(getParam('render', 'contactShadowsOpacity', 0.55)) || 0;
+contactShadowsPass.uniforms.maxDistance.value = Number(getParam('render', 'contactShadowsDistance', 0.08)) || 0;
+contactShadowsPass.uniforms.steps.value       = 10;
+composer.addPass(contactShadowsPass);
+// ③ SAOPass：默认 ssao 模式占位；后续 ensureAoMode('ssgi') 可 dispose+替换为 SSGI
+const saoPass = new SAOPass(scene, camera, false, true);
+saoPass.enabled = !!getParam('render', 'ssaoEnabled', false);
+saoPass.params.intensity = Number(getParam('render', 'ssaoIntensity', 0.75)) || 0;
+saoPass.params.radius    = Number(getParam('render', 'ssaoRadius', 8)) || 0;
+saoPass.params.saoScale  = 1.0;
+saoPass.params.saoBias   = 0.1;
+saoPass.params.saoIntensity = 0.95;
+let ssgiPass = null;   // SSGIPass：当前 three 版本未内置，保持为 null，由 ensureAoMode 统一降级到 SSAO
+composer.addPass(saoPass);
+// ④ Outline：描边（边缘稳定）
 const outlinePass = new OutlinePass(resolution, scene, camera, []);
-outlinePass.edgeStrength = getParam('render', 'edgeStrength', 0.9);
-outlinePass.edgeThickness = getParam('render', 'edgeThickness', 0.003);
+outlinePass.edgeStrength = Number(getParam('render', 'edgeStrength', 0.9)) || 0;
+outlinePass.edgeThickness = Number(getParam('render', 'edgeThickness', 0.003)) || 0;
 outlinePass.visibleEdgeColor = new THREE.Color(String(getParam('render', 'edgeColor', '#111827')));
 outlinePass.hiddenEdgeColor = new THREE.Color(0x000000);
 outlinePass.edgeGlow = 0;
 outlinePass.downSampleRatio = 2;
 outlinePass.pulsePeriod = 0;
+outlinePass.enabled = !!getParam('render', 'outlineEnabled', true);
 composer.addPass(outlinePass);
+// ⑤ GodRay：先建立占位（默认 disabled 0 开销），ensureGodRayPass(true) 再打开
+let godRayPass = null;
+try {
+  godRayPass = new ShaderPass(GodRayShader);
+  godRayPass.enabled = false; // 初始关（避免 uniform 未同步时黑块）
+  const gU = godRayPass.uniforms;
+  gU.tDepth.value = depthTexture;
+  gU.uResolution.value.set(Math.max(1, resolution.x), Math.max(1, resolution.y));
+  gU.uCameraNear.value = camera.near;
+  gU.uCameraFar.value  = camera.far;
+  gU.uIntensity.value = Number(getParam('render', 'godRayIntensity', 0.85)) || 0;
+  gU.uDecay.value     = Number(getParam('render', 'godRayDecay', 0.955)) || 0.95;
+  gU.uWeight.value    = Number(getParam('render', 'godRayWeight', 0.35)) || 0.35;
+  gU.uSamples.value   = Math.max(8, Math.min(128, Math.floor(Number(getParam('render', 'godRaySamples', 32)) || 32)));
+  composer.addPass(godRayPass);
+} catch (e) {
+  console.warn('[GodRayPass] init failed:', e && e.message);
+  try { toast('体积光 Shader 编译失败，已自动关闭', 'warn'); } catch (_) {}
+  godRayPass = null;
+}
+// ⑥ LensFlare：先占位（默认关）
+let lensFlarePass = null;
+try {
+  lensFlarePass = new ShaderPass(LensFlareShader);
+  lensFlarePass.enabled = false;
+  const lU = lensFlarePass.uniforms;
+  lU.tDepth.value = depthTexture;
+  lU.uResolution.value.set(Math.max(1, resolution.x), Math.max(1, resolution.y));
+  lU.uCameraNear.value = camera.near;
+  lU.uCameraFar.value  = camera.far;
+  lU.uIntensity.value = Number(getParam('render', 'lensFlareIntensity', 0.7)) || 0;
+  lU.uThreshold.value = Math.max(0.1, Math.min(1, Number(getParam('render', 'lensFlareThreshold', 0.9)) || 0.9));
+  lU.uGhosts.value    = Math.max(1, Math.min(12, Math.floor(Number(getParam('render', 'lensFlareGhosts', 6)) || 6)));
+  lU.uChromatic.value = Math.max(0, Math.min(0.3, Number(getParam('render', 'lensFlareChromatic', 0.08)) || 0.08));
+  composer.addPass(lensFlarePass);
+} catch (e) {
+  console.warn('[LensFlarePass] init failed:', e && e.message);
+  try { toast('镜头光晕 Shader 编译失败，已自动关闭', 'warn'); } catch (_) {}
+  lensFlarePass = null;
+}
+// ⑦ Bloom：泛光（在 GodRay/Lens 之后，让它们的高亮度也泛开）
+const bloomPass = new UnrealBloomPass(resolution,
+  Number(getParam('render', 'bloomStrength', 0.42)) || 0,
+  Number(getParam('render', 'bloomRadius', 0.52)) || 0,
+  Number(getParam('render', 'bloomThreshold', 0.82)) || 0
+);
+bloomPass.enabled = !!getParam('render', 'bloomEnabled', true);
+composer.addPass(bloomPass);
+// ⑧ ColorBalancePass：色彩校正（在线性 HDR 空间，toneMapping 之前 → OutputPass 之前 FXAA 之后的位置）
+let colorBalancePass = null;
+try {
+  colorBalancePass = new ShaderPass(ColorBalanceShader);
+  colorBalancePass.enabled = !!getParam('render', 'colorBalanceEnabled', true);
+  const u = colorBalancePass.uniforms;
+  const gain = colorTempTintToWBGain(
+    Number(getParam('render', 'colorTemp', 5800)) || 5800,
+    Number(getParam('render', 'colorTint', 0)) || 0
+  );
+  u.uWBGain.value.set(gain[0], gain[1], gain[2]);
+  u.uContrast.value   = Math.max(0.5, Math.min(1.6, Number(getParam('render', 'contrast', 1.05)) || 1.0));
+  u.uSaturation.value = Math.max(0,   Math.min(1.6, Number(getParam('render', 'saturation', 1.0)) || 0));
+  u.uVibrance.value   = Math.max(0,   Math.min(1.6, Number(getParam('render', 'vibrance', 1.1)) || 0));
+  u.uLift.value = Math.max(-0.3, Math.min(0.3, Number(Array.isArray(getParam('render','liftGammaGain')) ? getParam('render','liftGammaGain')[0] : 0) || 0));
+  u.uGamma.value = Math.max(0.3,  Math.min(2.5, Number(Array.isArray(getParam('render','liftGammaGain')) ? getParam('render','liftGammaGain')[1] : 1) || 1));
+  u.uGain.value = Math.max(0.3,  Math.min(2.5, Number(Array.isArray(getParam('render','liftGammaGain')) ? getParam('render','liftGammaGain')[2] : 1) || 1));
+  composer.addPass(colorBalancePass);
+} catch (e) {
+  console.warn('[ColorBalancePass] init failed:', e && e.message);
+  try { toast('色彩通道 Shader 编译失败，已关闭色彩后处理', 'warn'); } catch (_) {}
+  colorBalancePass = null;
+  // 同步参数以免 UI 显示"开"但实际关
+  try { setParam('render', 'colorBalanceEnabled', false, { persist: true, apply: false }); } catch (_) {}
+}
+// ⑨ FXAA：快速抗锯齿（色彩校正 → tonemap 之前）
 const fxaaPass = new ShaderPass(FXAAShader);
 fxaaPass.uniforms['resolution'].value = new THREE.Vector2(
-  1 / (resolution.x * renderer.getPixelRatio()),
-  1 / (resolution.y * renderer.getPixelRatio())
+  1 / Math.max(1, resolution.x * renderer.getPixelRatio()),
+  1 / Math.max(1, resolution.y * renderer.getPixelRatio())
 );
 fxaaPass.enabled = !!getParam('render', 'fxaaEnabled', true);
 composer.addPass(fxaaPass);
+// ⑩ OutputPass：sRGB 输出 + toneMapping
 const outputPass = new OutputPass();
 composer.addPass(outputPass);
-outlinePass.enabled = !!getParam('render', 'outlineEnabled', true);
-window.__postfx = { composer, renderPass: renderPassFinal, outlinePass, fxaaPass, outputPass };
+// 最终挂 postfx 引用（含 aoMode 切换用到的 saoPass/ssgiPass、GodRay/Lens/ColorBalance）
+window.__postfx = {
+  composer,
+  renderPass: renderPassFinal,
+  depthTexture,
+  saoPass, ssgiPass,
+  outlinePass,
+  godRayPass, lensFlarePass,
+  bloomPass,
+  colorBalancePass,
+  contactShadowsPass,
+  fxaaPass,
+  outputPass,
+  envRT: null, envRTTexture: null, __envBgOverride: false,
+  iesCache: null,
+  __lastToneMapping: null, __lastTempTintKey: null, __lastEnvMapIntensity: null,
+  __presetApplying: false,
+  __fpsRollingSamples: [],
+};
 
 // 地面
 const gridHelper = new THREE.GridHelper(20, 20, 0xCBD5E1, 0xE2E8F0);
+gridHelper.material.opacity = 0.35;
+gridHelper.material.transparent = true;
 scene.add(gridHelper);
+// 地面阴影接收层（仅接收阴影，不渲染自身颜色）
+const groundShadow = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.ShadowMaterial({ opacity: 0.35 })
+);
+groundShadow.rotation.x = -Math.PI / 2;
+groundShadow.receiveShadow = true;
+groundShadow.position.y = -0.001; // 略低于主地面避免Z-fighting
+scene.add(groundShadow);
+// PBR 地面材质层：提供真实感反射与质感
 const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(40, 40),
-  new THREE.ShadowMaterial({ opacity: 0.22 })
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({
+    color: 0x2a2f3a,
+    roughness: 0.85,
+    metalness: 0.08,
+  })
 );
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
@@ -509,6 +2826,227 @@ function setStatus(text, kind = 'info', detail = '') {
   statusText.className = kind === 'error' ? 'error' : (kind === 'warn' ? 'warn' : '');
   statusDetail.textContent = detail || '';
 }
+// ---- 轻量 toast（右下角 3s 自动消失）----
+let _toastTimer = null;
+let _toastEl = null;
+function toast(text, kind = 'info') {
+  try {
+    if (!_toastEl) {
+      const el = document.createElement('div');
+      el.className = 'info-toast';
+      Object.assign(el.style, {
+        position: 'fixed', right: '22px', bottom: '22px', zIndex: '999999',
+        padding: '10px 14px', borderRadius: '10px', color: '#fff',
+        fontSize: '13px', fontWeight: '500',
+        backdropFilter: 'blur(14px) saturate(140%)',
+        WebkitBackdropFilter: 'blur(14px) saturate(140%)',
+        background: 'rgba(15,20,30,0.72)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+        opacity: '0', transform: 'translateY(8px)', transition: 'all .25s ease',
+        pointerEvents: 'none', maxWidth: '420px',
+      });
+      document.body.appendChild(el);
+      _toastEl = el;
+    }
+    _toastEl.textContent = String(text || '');
+    if (kind === 'warn') _toastEl.style.background = 'rgba(78,55,12,0.78)';
+    else if (kind === 'error') _toastEl.style.background = 'rgba(86,18,24,0.78)';
+    else _toastEl.style.background = 'rgba(15,20,30,0.72)';
+    _toastEl.style.opacity = '1';
+    _toastEl.style.transform = 'translateY(0)';
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => {
+      if (!_toastEl) return;
+      _toastEl.style.opacity = '0';
+      _toastEl.style.transform = 'translateY(8px)';
+    }, 3000);
+  } catch (_) { /* noop */ }
+}
+// ---------- 球面坐标工具 ----------
+const deg2rad = (d) => (Number(d) || 0) * Math.PI / 180;
+// ---------- 色温 + Tint → 白平衡 RGB Gain（CIE Planck 近似插值）----------
+function colorTempTintToWBGain(tempK, tint) {
+  // 已知锚点：2000K 暖 ~ 6500K 白 ~ 12000K 冷
+  const anchors = [
+    [ 2000, 1.220, 1.000, 0.760],
+    [ 3000, 1.120, 1.000, 0.850],
+    [ 4500, 1.035, 1.000, 0.940],
+    [ 5500, 1.000, 1.000, 0.985],
+    [ 6500, 1.000, 1.000, 1.000],
+    [ 8000, 0.965, 1.000, 1.065],
+    [10000, 0.945, 1.000, 1.130],
+    [12000, 0.930, 1.000, 1.220],
+  ];
+  const T = Math.max(2000, Math.min(12000, Number(tempK) || 6500));
+  let i = 0;
+  while (i < anchors.length - 2 && anchors[i + 1][0] < T) i++;
+  const a = anchors[i], b = anchors[i + 1];
+  const t = (T - a[0]) / (b[0] - a[0]);
+  let R = a[1] + (b[1] - a[1]) * t;
+  let G = a[2] + (b[2] - a[2]) * t;
+  let B = a[3] + (b[3] - a[3]) * t;
+  // tint ∈ [-100, 100]：负=偏绿，正=偏洋红（G axis 反向上/向下，R+B 反向下/向上）
+  const tN = Math.max(-100, Math.min(100, Number(tint) || 0)) / 100;
+  const gShift = -0.12 * tN;     // +tint → G↓
+  const rbShift = +0.06 * tN;    // +tint → R,B 略增 (洋红)
+  R = Math.max(0.1, R + rbShift);
+  G = Math.max(0.1, G + gShift);
+  B = Math.max(0.1, B + rbShift);
+  // 归一化：以 G=1.0 为基准，保留整体曝光量级
+  return [R, G, B];
+}
+// ---------- 阴影类型切换（VSM 用更紧凑的 bias/near/far 防 acne）----------
+function applyShadowMapType(type, opts = {}) {
+  const scale = typeof opts.scale === 'number' ? opts.scale : 1.0;
+  const hard  = !!opts.hardLightMode;
+  const enabled = type !== 'none';
+  try { renderer.shadowMap.enabled = enabled; } catch (_) {}
+  if (!enabled) return;
+  const map = {
+    basic:   THREE.BasicShadowMap,
+    pcfsoft: THREE.PCFSoftShadowMap,
+    vsm:     (typeof THREE.VSMShadowMap !== 'undefined') ? THREE.VSMShadowMap : THREE.PCFSoftShadowMap,
+  };
+  const resolved = (typeof map[type] !== 'undefined') ? map[type] : THREE.PCFSoftShadowMap;
+  try { renderer.shadowMap.type = resolved; } catch (_) {}
+  if (!dirLight || !keyLight) return;
+  // ---- dirLight ----
+  try {
+    if (type === 'vsm') {
+      dirLight.shadow.camera.near = Math.max(0.1, 0.5 * scale);
+      dirLight.shadow.camera.far  = Math.max(1, 30 * scale);
+      dirLight.shadow.bias        = -0.0003 * scale;
+      dirLight.shadow.normalBias  = 0.02 * Math.max(0, scale);
+      dirLight.shadow.radius      = hard ? 0.2 : 3.0;
+    } else if (type === 'basic') {
+      dirLight.shadow.camera.near = Math.max(0.1, 0.4 * scale);
+      dirLight.shadow.camera.far  = Math.max(1, 50 * scale);
+      dirLight.shadow.bias        = -0.0005 * scale;
+      dirLight.shadow.normalBias  = 0.02 * Math.max(0, scale);
+      dirLight.shadow.radius      = 0.15;
+    } else {
+      dirLight.shadow.camera.near = Math.max(0.1, 0.5 * scale);
+      dirLight.shadow.camera.far  = Math.max(1, 50 * scale);
+      dirLight.shadow.bias        = -0.0005 * scale;
+      dirLight.shadow.normalBias  = 0.03 * Math.max(0, scale);
+      dirLight.shadow.radius      = hard ? 0.5 : 3.0;
+    }
+    dirLight.shadow.camera.updateProjectionMatrix();
+    if (dirLight.shadow.map) dirLight.shadow.map.needsUpdate = true;
+  } catch (_) { /* noop */ }
+  // ---- keyLight ----
+  try {
+    if (type === 'vsm') {
+      keyLight.shadow.camera.near = Math.max(0.1, 0.4 * scale);
+      keyLight.shadow.camera.far  = Math.max(1, 30 * scale);
+      keyLight.shadow.bias        = -0.00012 * scale;
+      keyLight.shadow.normalBias  = 0.015 * Math.max(0, scale);
+    } else if (type === 'basic') {
+      keyLight.shadow.camera.near = Math.max(0.1, 0.5 * scale);
+      keyLight.shadow.camera.far  = Math.max(1, 40 * scale);
+      keyLight.shadow.bias        = -0.00015 * scale;
+      keyLight.shadow.normalBias  = 0.015 * Math.max(0, scale);
+    } else {
+      keyLight.shadow.camera.near = Math.max(0.1, 0.5 * scale);
+      keyLight.shadow.camera.far  = Math.max(1, 40 * scale);
+      keyLight.shadow.bias        = -0.00015 * scale;
+      keyLight.shadow.normalBias  = 0.02 * Math.max(0, scale);
+    }
+    keyLight.shadow.camera.updateProjectionMatrix();
+    if (keyLight.shadow.map) keyLight.shadow.map.needsUpdate = true;
+  } catch (_) { /* noop */ }
+}
+// ---------- 灯光统一刷新：球面坐标 → 笛卡尔坐标（避免逐 key 重复算矩阵）----------
+function refreshLighting() {
+  if (typeof dirLight === 'undefined' || typeof keyLight === 'undefined') return;
+  try {
+    // ---- DirectionalLight（相对中心 12 单位距离）----
+    const dirAz   = deg2rad(getParam('render', 'dirAngle',  -42));
+    const dirAlt  = deg2rad(getParam('render', 'dirHeight',  38));
+    const DIR_R   = 12;
+    dirLight.position.set(
+      DIR_R * Math.cos(dirAlt) * Math.sin(dirAz),
+      DIR_R * Math.sin(dirAlt),
+     -DIR_R * Math.cos(dirAlt) * Math.cos(dirAz),
+    );
+    dirLight.target.position.set(0, 1.0, 0);
+    dirLight.target.updateMatrixWorld();
+    try { dirLight.color.copy(new THREE.Color(String(getParam('render', 'dirLightColor', 0xFFF1DC)))); } catch(_){}
+    dirLight.intensity = Math.max(0, Number(getParam('render', 'dirIntensity', 3.0)) || 0);
+
+    // ---- SpotLight Key Light（距离可配 + 方位角 + 高度角）----
+    const keyAlt  = deg2rad(getParam('render', 'keyLightHeight',  30));
+    const keyAz   = deg2rad(getParam('render', 'keyLightAzimuth', 45));
+    const dist    = Math.max(1, Number(getParam('render', 'keyLightDistance', 5.5)) || 5.5);
+    const keyAngD = Math.max(5, Math.min(90, Number(getParam('render', 'keyLightAngle', 32)) || 32));
+    keyLight.position.set(
+      dist * Math.cos(keyAlt) * Math.sin(keyAz),
+      dist * Math.sin(keyAlt) + 0.6,
+     -dist * Math.cos(keyAlt) * Math.cos(keyAz),
+    );
+    keyLight.target.position.set(0, 1.0, 0);
+    keyLight.target.updateMatrixWorld();
+    keyLight.angle = Math.PI / 180 * keyAngD;
+    keyLight.penumbra = Math.max(0, Math.min(1, Number(getParam('render', 'keyLightPenumbra', 0.35)) || 0));
+    const kBaseInt = Math.max(0, Number(getParam('render', 'keyLightIntensity', 6.0)) || 0);
+    const kScale   = Math.max(0.1, Number(getParam('render', 'iesIntensityScale', 1.0)) || 1);
+    keyLight.intensity = kBaseInt * kScale;
+    try { keyLight.color.copy(new THREE.Color(String(getParam('render', 'keyLightColor', 0xFFE8BF)))); } catch(_){}
+    keyLight.castShadow = !!getParam('render', 'keyLightEnabled', true);
+    keyLight.visible    = !!getParam('render', 'keyLightEnabled', true);
+    keyLight.updateProjectionMatrix && keyLight.updateProjectionMatrix();
+
+    // ---- Fill / Rim / Hemisphere / Ambient ----
+    try { fillLight.color.copy(new THREE.Color(String(getParam('render', 'fillLightColor', 0x96C8FF)))); } catch(_){}
+    fillLight.intensity = Math.max(0, Number(getParam('render', 'fillIntensity', 0.3)) || 0);
+    // Fill 位置：与 dir 对称的对面（左前）
+    try {
+      const fAz = deg2rad(Number(getParam('render', 'dirAngle', -42)) + 180);
+      const fAlt = deg2rad(Math.min(45, Math.max(5, (Number(getParam('render', 'dirHeight', 38)) * 0.5 + 10))));
+      fillLight.position.set(
+        7 * Math.cos(fAlt) * Math.sin(fAz),
+        5 * Math.sin(fAlt) + 1,
+       -7 * Math.cos(fAlt) * Math.cos(fAz),
+      );
+    } catch (_) {}
+    try { rimLight.color.copy(new THREE.Color(String(getParam('render', 'rimLightColor', 0xFFC890)))); } catch(_){}
+    rimLight.intensity = Math.max(0, Number(getParam('render', 'rimLightIntensity', 1.1)) || 0);
+    rimLight.visible   = !!getParam('render', 'rimLightEnabled', true);
+    // Rim 球面坐标（剪影背光预设需要 -170° 后方上高位）
+    try {
+      const rAz  = deg2rad(getParam('render', 'rimLightAzimuth', -140));
+      const rAlt = deg2rad(getParam('render', 'rimLightHeight',   45));
+      const R_R = 10;
+      rimLight.position.set(
+        R_R * Math.cos(rAlt) * Math.sin(rAz),
+        R_R * Math.sin(rAlt) + 1.5,
+       -R_R * Math.cos(rAlt) * Math.cos(rAz),
+      );
+    } catch (_) {}
+    hemisphereLight.intensity = Math.max(0, Number(getParam('render', 'hemiIntensity', 0.6)) || 0);
+    ambientLight.intensity    = Math.max(0, Number(getParam('render', 'ambientIntensity', 0.65)) || 0);
+
+    // ---- ShadowMap Type / Bias ----
+    try {
+      applyShadowMapType(
+        String(getParam('render', 'shadowMapType', 'vsm') || 'vsm'),
+        {
+          scale: Number(getParam('render', 'shadowBiasScale', 1.0) || 1.0),
+          hardLightMode: !!getParam('render', 'hardLightMode', false),
+        }
+      );
+    } catch (_) { /* noop */ }
+
+    // 强制刷新 shadow textures（预设切换后"影子不更新"问题）
+    try { if (dirLight.shadow && dirLight.shadow.map) dirLight.shadow.map.needsUpdate = true; } catch (_) {}
+    try { if (keyLight.shadow && keyLight.shadow.map) keyLight.shadow.map.needsUpdate = true; } catch (_) {}
+  } catch (e) {
+    console.warn('[refreshLighting] caught:', e && e.message);
+  }
+}
+// 灯光声明完后立即用 PARAMS 正确就位一次
+try { refreshLighting(); } catch (_) {}
 function fmtSize(bytes) {
   if (bytes == null) return '';
   if (bytes < 1024) return bytes + ' B';
@@ -1776,7 +4314,8 @@ function clearModel() {
   currentAnimating = false;
   vmdFiles = [];
   vmdListEl.innerHTML = '';
-  animPanel.classList.add('hidden');
+  animPanelUserCollapsed = false;
+  setAnimPanelVisible(false);
   // 清空描边所选对象，避免残留已释放网格引用
   refreshOutlineSelection();
 }
@@ -1814,7 +4353,8 @@ function clearSceneModels() {
     currentAnimating = false;
     vmdFiles = [];
     vmdListEl.innerHTML = '';
-    animPanel.classList.add('hidden');
+    animPanelUserCollapsed = false;
+    setAnimPanelVisible(false);
     modelInfoEl.innerHTML = '<div class="placeholder">点击「选择模型」或在左侧选文件开始预览</div>';
   }
   refreshOutlineSelection();
@@ -1840,7 +4380,8 @@ function removeSceneItems(pred) {
       currentAnimating = false;
       vmdFiles = [];
       vmdListEl.innerHTML = '';
-      animPanel.classList.add('hidden');
+      animPanelUserCollapsed = false;
+      setAnimPanelVisible(false);
       modelInfoEl.innerHTML = '<div class="placeholder">点击「选择模型」或在左侧选文件开始预览</div>';
     }
   });
@@ -1942,6 +4483,7 @@ async function loadModel(node, opts = {}) {
         if (!mmdHelper.objects.has(mesh)) {
           mmdHelper.add(mesh, buildHelperOptions(mesh, { animation: undefined }));
           syncIkSolverForMesh(mesh);
+          tunePhysicsForMesh(mesh);
         }
         composeTargetMesh = mesh;
         composeSelected = mesh;
@@ -1989,6 +4531,7 @@ async function loadModel(node, opts = {}) {
     mmdHelper.add(mesh, helperOpts);
     // 模型加载即同步一次 ikSolver（无动画时 ikSolver 也会被 _setupMeshAnimation 创建）
     syncIkSolverForMesh(mesh);
+    tunePhysicsForMesh(mesh);
 
     // 聚焦角色本身，避免被巨大场景模型（如舞台）的全包围盒把相机拉远导致角色不可见
     frameModel(mesh);
@@ -2432,16 +4975,47 @@ function showModelInfo(mesh, node) {
 }
 
 // ---------- VMD 动作 ----------
+// 用户手动收起动画面板的状态：true 表示用户点过「—」收起；后续 setupVmdList 不会自动展开面板
+// 但会显示迷你 tab，用户点击即可展开
+let animPanelUserCollapsed = false;
+function setAnimPanelVisible(visible, { userInitiated = false, hasMotionsHint = null } = {}) {
+  const miniTab = $('anim-mini-tab');
+  if (!animPanel || !miniTab) return;
+  // hasMotionsHint = true 表示「当前有可用动作」；false 表示没动作；null 则按 DOM 状态判定
+  const hasMotions = (hasMotionsHint === null)
+    ? (!!vmdListEl && vmdListEl.querySelectorAll('.vmd-item').length > 0)
+    : !!hasMotionsHint;
+  if (visible) {
+    animPanel.classList.remove('hidden');
+    miniTab.classList.add('hidden');
+    if (userInitiated) animPanelUserCollapsed = false;
+  } else {
+    animPanel.classList.add('hidden');
+    // 仅在有可用动作时才显示迷你 tab（没有动作时直接隐藏，免得误导）
+    if (hasMotions || userInitiated) miniTab.classList.remove('hidden');
+    else miniTab.classList.add('hidden');
+    if (userInitiated) animPanelUserCollapsed = true;
+  }
+}
 function setupVmdList(mesh) {
   vmdListEl.innerHTML = '';
   const allVmd = [];
-  vmdFiles.forEach((v) => allVmd.push({ ...v, from: '同目录' }));
+  // 仅当前 mesh 对应的模型路径（或当前角色）才算「同目录 VMD」；
+  // 拖放的场景背景/放置模型，不给它找同目录 VMD（避免场景切换误显示动画面板）
+  const isCurrentRole = (!mesh) || (mesh === currentModel) || (mesh === currentMesh);
+  if (isCurrentRole) {
+    vmdFiles.forEach((v) => allVmd.push({ ...v, from: '同目录' }));
+  }
   motionRootItems.forEach((v) => {
     if (!allVmd.find((a) => isSamePath(a.path, v.path))) allVmd.push({ ...v, from: '动作库' });
   });
 
-  if (!allVmd.length) { animPanel.classList.add('hidden'); return; }
-  animPanel.classList.remove('hidden');
+  if (!allVmd.length) {
+    // 无动作：面板+迷你tab 都隐藏，清除用户手动收起状态（下次扫到动作时正常展开）
+    animPanelUserCollapsed = false;
+    setAnimPanelVisible(false, { hasMotionsHint: false });
+    return;
+  }
   allVmd.forEach((v) => {
     const el = document.createElement('div');
     el.className = 'vmd-item';
@@ -2452,7 +5026,21 @@ function setupVmdList(mesh) {
     el.addEventListener('click', () => playVmd(v, mesh, el));
     vmdListEl.appendChild(el);
   });
+  // 有动作：用户没有主动收起 → 展开面板；用户主动收起 → 显示迷你 tab
+  if (animPanelUserCollapsed) setAnimPanelVisible(false, { hasMotionsHint: true });
+  else setAnimPanelVisible(true, { hasMotionsHint: true });
 }
+// 绑定收起按钮 / 迷你 tab 展开
+(function bindAnimPanelCollapse() {
+  const collapseBtn = $('btn-anim-collapse');
+  const miniTab = $('anim-mini-tab');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', () => setAnimPanelVisible(false, { userInitiated: true }));
+  }
+  if (miniTab) {
+    miniTab.addEventListener('click', () => setAnimPanelVisible(true, { userInitiated: true }));
+  }
+})();
 async function playVmd(vmdNode, mesh, el) {
   const url = api.mmdUrl(vmdNode.path);
   setStatus('加载动作 ' + vmdNode.name + ' …');
@@ -2486,6 +5074,7 @@ async function playVmd(vmdNode, mesh, el) {
       const opts = buildHelperOptions(mesh, { animation: clip });
       mmdHelper.add(mesh, opts);
       syncIkSolverForMesh(mesh);
+      tunePhysicsForMesh(mesh);
     }
     currentAnimating = true;
 
@@ -2604,24 +5193,131 @@ async function renderModList() {
 
 // ---------- 渲染循环 ----------
 const clock = new THREE.Clock();
+// 缓存帧计时 + 动画固定步长，避免「tab 切出再切回」的巨大 delta、以及设备刷新率差异造成的物理抖动
+const FPS_TARGET = 60;
+const FIXED_DT = 1 / FPS_TARGET;          // 16.67ms：MMD 动画/物理的固定步长
+let _accumulator = 0;                     // 累积时间：用于多步物理/动画更新追赶
+let _cachedPixelRatio = 1;                // 缓存 pixelRatio，避免每帧 getPixelRatio() 读 CSSOM
+let _cachedViewport = { w: 0, h: 0 };     // 缓存视口尺寸，resize() 改变后才同步到后处理
+// 动画帧内可复用临时向量（避免 GC 暂停造成的 1-3ms 顿挫）
+const _tmpVecA = new THREE.Vector3();
+const _tmpVecB = new THREE.Vector3();
+const _tmpVecC = new THREE.Vector3();
+const _tmpColA = new THREE.Color();
+const _tmpMat4A = new THREE.Matrix4();
+// ---------- FPS 监控（窗口右上角）：EMA 平滑 + 500ms 刷新 + 颜色分级 ----------
+let _fpsLastTs = performance.now();
+let _fpsFrames = 0;
+let _fpsEma = 0;
+function _fpsTick() {
+  const now = performance.now();
+  const dt = (now - _fpsLastTs) / 1000;
+  if (dt <= 0) return;
+  const inst = _fpsFrames / dt;
+  _fpsEma = _fpsEma === 0 ? inst : _fpsEma * 0.6 + inst * 0.4;
+  _fpsLastTs = now; _fpsFrames = 0;
+  const el = document.getElementById('fps-monitor');
+  if (el) {
+    const v = _fpsEma;
+    let cls = 'fps-good';
+    if (v < 30) cls = 'fps-bad';
+    else if (v < 45) cls = 'fps-warn';
+    el.className = 'fps-monitor ' + cls;
+    el.textContent = `${v.toFixed(0)} FPS`;
+    el.title = `EMA FPS: ${v.toFixed(1)}  平滑系数:0.6`;
+  }
+}
+setInterval(_fpsTick, 500);
+// CHIP 低频同步：避免预设切换后 chip 显示延迟
+setInterval(() => { try { updateRqpChip(); } catch (_) {} }, 1200);
+
 function animate() {
   requestAnimationFrame(animate);
+  _fpsFrames += 1;
   window.__renderFrames = (window.__renderFrames || 0) + 1;
-  const delta = clock.getDelta();
-  const speed = parseFloat(speedRange.value || '1');
-  // 无动作也要跑 helper.update(0)：物理（布料）继续惯性摆动 ~0.3s
-  const d = currentAnimating ? delta * speed : 0;
-  if (mmdHelper) {
+  // 第 10 帧后再构建 PMREM 环境贴图：确保 WebGL 上下文、canvas 绑定、后处理管线均已就绪
+  if (window.__renderFrames === 10) {
+    try { buildEnvFromSky(); } catch (_) {}
+    // 首次渲染同步：缓存 pixelRatio + 视口尺寸，保证后续后处理分辨率不再每帧从 DOM 读
     try {
-      mmdHelper.update(d);
-    } catch (err) {
-      // 防止某一帧物理/IK 异常导致整帧卡崩
-      console.warn('[MMDAnimationHelper.update] caught:', err && err.message);
+      _cachedPixelRatio = renderer.getPixelRatio();
+      const vp = document.getElementById('viewport');
+      const w = vp ? vp.clientWidth : canvas.clientWidth;
+      const h = vp ? vp.clientHeight : canvas.clientHeight;
+      _cachedViewport.w = w; _cachedViewport.h = h;
+    } catch (_) {}
+  }
+
+  // ---- 1) 稳定 delta：getDelta() 过大（tab 切换后台）时裁剪 ----
+  let rawDelta = clock.getDelta();
+  if (rawDelta <= 0) rawDelta = FIXED_DT;
+  // tab 隐藏/切换回来时 getDelta() 可能 = 2~30s，强行压到 2 帧步长避免物理世界爆炸 + 动画整段跳帧
+  if (rawDelta > FIXED_DT * 3) rawDelta = FIXED_DT * 2;
+  const speed = parseFloat(speedRange.value || '1') || 1;
+  const animScale = currentAnimating ? speed : 0;  // 无动作：动画(骨骼)更新=0，但物理惯性保持自然 dt
+  // 物理 dt 永远带真实 dt（但有上限），保证布料在无动作时也能自然摆动/下垂
+  const physRawDelta = (rawDelta > FIXED_DT * 2) ? FIXED_DT * 2 : rawDelta;
+
+  // ---- 2) 固定步长累积 + 追赶：消除物理大步长造成的 jank ----
+  _accumulator += physRawDelta;
+  // 最多追赶 5 次（~83ms），避免后台挂起后前台瞬间卡顿
+  const MAX_SUB_STEPS = 5;
+  let subSteps = 0;
+  while (_accumulator >= FIXED_DT && subSteps < MAX_SUB_STEPS) {
+    _accumulator -= FIXED_DT;
+    subSteps += 1;
+    if (mmdHelper) {
+      try {
+        // helper.update(dt) 既更新 mixer(骨骼) 又更新 physics(布料/IK)
+        // 混合：动画（骨骼）速度由 animScale 驱动，物理按 FIXED_DT 自然前进
+        // 但是 MMDHelper 的 update() 内部 physics.step 接受固定 dt，骨骼动画接受我们传入的 dt
+        // 此处做折中：用 FIXED_DT * animScale 驱动动画 + 物理整体 update；
+        // 物理会跟随骨骼新位置 step，避免 substep 内动画速度过快导致物理被甩飞
+        const dtMix = FIXED_DT * animScale;
+        mmdHelper.update(dtMix);
+      } catch (err) {
+        console.warn('[MMDAnimationHelper.update] caught:', err && err.message);
+      }
     }
   }
+  // 追赶次数过多时直接丢弃累积，避免极端情况下一直追赶无法释放 CPU
+  if (subSteps === MAX_SUB_STEPS && _accumulator > FIXED_DT * 2) {
+    _accumulator = 0;
+  }
+
+  if (mmdHelper) {
+    // ===== 拖拽后暖启动：前 N 帧对处于「待冷却」状态的 physics 每帧清零速度 =====
+    // 避免 physics.reset() 后的约束回弹使布料剧烈抖动
+    try {
+      const warm = window.__physicsWarmFrames;
+      if (warm && warm.size > 0 && mmdHelper.objects) {
+        for (const [mesh, remain] of warm.entries()) {
+          if (!mesh || !mmdHelper.objects.has(mesh)) { warm.delete(mesh); continue; }
+          const obj = mmdHelper.objects.get(mesh);
+          const p = obj && obj.physics;
+          if (p && p.bodies && p.manager && p.manager.allocVector3) {
+            const zero = p.manager.allocVector3();
+            zero.setValue(0, 0, 0);
+            for (const rb of p.bodies) {
+              if (!rb || !rb.body) continue;
+              try { rb.body.setLinearVelocity(zero); } catch (_) {}
+              try { rb.body.setAngularVelocity(zero); } catch (_) {}
+            }
+            p.manager.freeVector3(zero);
+          }
+          const next = remain - 1;
+          if (next <= 0) warm.delete(mesh);
+          else warm.set(mesh, next);
+        }
+      }
+    } catch (_) { /* noop */ }
+  }
+
+  // ---- 3) 控制器 & 渲染 ----
   controls.update();
+  // composer.render(delta)：EffectComposer.render(delta) 只传给 shader 的 time uniform，我们给零即可（不改变现有行为）
   if (window.__postfx && window.__postfx.composer) {
-    window.__postfx.composer.render(d);
+    window.__postfx.composer.render(0);
   } else {
     renderer.render(scene, camera);
   }
@@ -2629,29 +5325,70 @@ function animate() {
 animate();
 
 // ---------- 窗口尺寸 ----------
-function resize() {
+let _resizeRaf = 0;
+function _resizeNow() {
+  _resizeRaf = 0;
   // 以容器尺寸为基准：renderer.setSize 会把 canvas 写成固定 px 内联宽，
   // 若以 canvas.clientWidth 为基准，拖拽侧栏/折叠/窗口缩放后读到的会是陈旧值，画布不更新
   const vp = document.getElementById('viewport');
   const w = vp ? vp.clientWidth : canvas.clientWidth;
   const h = vp ? vp.clientHeight : canvas.clientHeight;
   if (w === 0 || h === 0) return;
+  // 尺寸没变就不重设（setSize 会触发 gl.canvas.width/height 重分配 + FBO 重建，代价很大）
+  if (_cachedViewport && _cachedViewport.w === w && _cachedViewport.h === h) return;
+  _cachedViewport.w = w; _cachedViewport.h = h;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  _cachedPixelRatio = renderer.getPixelRatio();
   if (window.__postfx && window.__postfx.composer) {
     window.__postfx.composer.setSize(w, h);
-    const pixelRatio = renderer.getPixelRatio();
+    const pr = _cachedPixelRatio;
     if (window.__postfx.fxaaPass) {
       const u = window.__postfx.fxaaPass.uniforms && window.__postfx.fxaaPass.uniforms['resolution'];
-      if (u && u.value) {
-        u.value.set(1 / (w * pixelRatio), 1 / (h * pixelRatio));
-      }
+      if (u && u.value) u.value.set(1 / (w * pr), 1 / (h * pr));
+    }
+    if (window.__postfx.contactShadowsPass && window.__postfx.contactShadowsPass.uniforms) {
+      const u = window.__postfx.contactShadowsPass.uniforms.resolution;
+      if (u && u.value) u.value.set(Math.max(1, w * pr), Math.max(1, h * pr));
+      const uf = window.__postfx.contactShadowsPass.uniforms.cameraFar;
+      if (uf) uf.value = camera.far;
+      const un = window.__postfx.contactShadowsPass.uniforms.cameraNear;
+      if (un) un.value = camera.near;
     }
     if (window.__postfx.outlinePass) {
       window.__postfx.outlinePass.resolution.set(w, h);
     }
+    // ---- 新后处理段的分辨率同步：避免 setSize 后 FBO 与 canvas 比例错配 ----
+    if (window.__postfx.saoPass && typeof window.__postfx.saoPass.setSize === 'function') {
+      try { window.__postfx.saoPass.setSize(w, h); } catch (_) {}
+    }
+    if (window.__postfx.ssgiPass && typeof window.__postfx.ssgiPass.setSize === 'function') {
+      try { window.__postfx.ssgiPass.setSize(w, h); } catch (_) {}
+    }
+    if (window.__postfx.ssaoPass && typeof window.__postfx.ssaoPass.setSize === 'function') {
+      try { window.__postfx.ssaoPass.setSize(w, h); } catch (_) {}
+    }
+    if (window.__postfx.godRayPass && window.__postfx.godRayPass.uniforms) {
+      const u = window.__postfx.godRayPass.uniforms.resolution;
+      if (u && u.value) u.value.set(1 / Math.max(1, w * pr), 1 / Math.max(1, h * pr));
+    }
+    if (window.__postfx.lensFlarePass && window.__postfx.lensFlarePass.uniforms) {
+      const u = window.__postfx.lensFlarePass.uniforms.resolution;
+      if (u && u.value) u.value.set(1 / Math.max(1, w * pr), 1 / Math.max(1, h * pr));
+    }
+    if (window.__postfx.colorBalancePass && window.__postfx.colorBalancePass.uniforms) {
+      const u = window.__postfx.colorBalancePass.uniforms.resolution;
+      if (u && u.value) u.value.set(1 / Math.max(1, w * pr), 1 / Math.max(1, h * pr));
+    }
+    if (window.__postfx.bloomPass && typeof window.__postfx.bloomPass.setSize === 'function') {
+      try { window.__postfx.bloomPass.setSize(w, h); } catch (_) {}
+    }
   }
+}
+function resize() {
+  if (_resizeRaf) return;
+  _resizeRaf = requestAnimationFrame(_resizeNow);
 }
 window.addEventListener('resize', resize);
 resize();
@@ -2660,18 +5397,30 @@ resize();
 const viewHintEl = $('view-hint');
 const GROUND_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _raycaster = new THREE.Raycaster();
+const _reuseNDC = new THREE.Vector2();
+const _reuseHitA = new THREE.Vector3();
+const _reuseHitB = new THREE.Vector3();
+const _reuseHitC = new THREE.Vector3();
+const _reuseRect = { left: 0, top: 0, width: 1, height: 1 };
+let _cachedCanvasRectTime = 0;
 function pointerNDC(e) {
-  const rect = canvas.getBoundingClientRect();
-  return new THREE.Vector2(
-    ((e.clientX - rect.left) / rect.width) * 2 - 1,
-    -((e.clientY - rect.top) / rect.height) * 2 + 1
+  // getBoundingClientRect 每帧会触发 reflow，低频缓存（60ms 内复用）
+  const now = performance.now();
+  if (now - _cachedCanvasRectTime > 60) {
+    const r = canvas.getBoundingClientRect();
+    _reuseRect.left = r.left; _reuseRect.top = r.top; _reuseRect.width = r.width; _reuseRect.height = r.height;
+    _cachedCanvasRectTime = now;
+  }
+  const { left, top, width, height } = _reuseRect;
+  return _reuseNDC.set(
+    ((e.clientX - left) / width) * 2 - 1,
+    -((e.clientY - top) / height) * 2 + 1
   );
 }
 function groundPointFromEvent(e) {
   if (!e) return null;
   _raycaster.setFromCamera(pointerNDC(e), camera);
-  const hit = new THREE.Vector3();
-  if (_raycaster.ray.intersectPlane(GROUND_PLANE, hit)) return hit;
+  if (_raycaster.ray.intersectPlane(GROUND_PLANE, _reuseHitA)) return _reuseHitA.clone();
   return null;
 }
 // 拖放：左侧树 / 缓存列表的模型行 → 拖到 3D 视口，在指定位置加入场景（场景与角色同时预览）
@@ -2727,6 +5476,11 @@ function restoreDragPhysics() {
       }
       p.manager.freeVector3(zero);
     }
+    // 阻尼 + 阈值：恢复后再次主动应用，保证拖拽后的布料不产生持续振荡
+    tunePhysicsForMesh(dragState.mesh, { forceApplyDamping: true });
+    // 登记暖启动：animate() 后续 8 帧继续每帧清零速度，消除约束回弹引起的剧烈抖动
+    if (!window.__physicsWarmFrames) window.__physicsWarmFrames = new Map();
+    window.__physicsWarmFrames.set(dragState.mesh, 8);
   } catch (_) { /* 无物理的模型忽略 */ }
 }
 function setMoveMode(on) {
@@ -2833,6 +5587,111 @@ $('btn-reset-view').addEventListener('click', () => {
     camera.position.set(0, 2.2, 5.2); controls.target.set(0, 1.1, 0); controls.update();
   }
 });
+$('btn-toggle-skybox').addEventListener('click', () => {
+  setSkyboxEnabled(!skyboxEnabled);
+});
+// ===== 渲染设置快捷浮层 =====
+(function bindRenderQuickPanel() {
+  const panel = $('render-quick-panel');
+  const btn = $('btn-render-panel');
+  const closeBtn = $('rqp-close');
+  const openFullBtn = $('rqp-open-full');
+  if (!panel || !btn) return;
+  const toggle = (want) => {
+    const show = typeof want === 'boolean' ? want : panel.classList.contains('hidden');
+    panel.classList.toggle('hidden', !show);
+    btn.classList.toggle('active', show);
+    if (show) try { syncRenderQuickPanelUI(); } catch (_) {}
+  };
+  btn.addEventListener('click', () => toggle());
+  if (closeBtn) closeBtn.addEventListener('click', () => toggle(false));
+  // 打开完整参数面板 -> 切右侧 info panel params tab
+  if (openFullBtn) {
+    openFullBtn.addEventListener('click', () => {
+      const infoTabBtn = document.querySelector('#info-panel .tab-btn[data-tab="params"]');
+      if (infoTabBtn) infoTabBtn.click();
+      toggle(false);
+    });
+  }
+  // ESC 关闭浮层
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !panel.classList.contains('hidden')) toggle(false);
+  });
+  // 预设按钮
+  const presetBtns = panel.querySelectorAll('.rqp-preset');
+  presetBtns.forEach((pb) => {
+    pb.addEventListener('click', () => {
+      const name = pb.dataset.preset;
+      if (name === 'custom') {
+        setParam('render', 'renderPreset', 'custom', { persist: true, apply: true });
+      } else if (_PRESETS[name]) {
+        setParam('render', 'renderPreset', name, { persist: true, apply: true });
+      }
+    });
+  });
+  // 开关
+  panel.querySelectorAll('.rqp-switch input[type="checkbox"]').forEach((inp) => {
+    const rk = inp.closest('[data-rk]') ? inp.closest('[data-rk]').dataset.rk : inp.parentElement.querySelector('span').textContent;
+    const key = inp.parentElement.dataset.rk || inp.closest('.rqp-switch').dataset.rk || inp.dataset.rk;
+    // data-rk 直接放在 <input> 上（按我们 HTML 写法）
+    const actualKey = inp.dataset.rk || key;
+    inp.addEventListener('change', () => {
+      setParam('render', actualKey, !!inp.checked);
+      // applyParam 会自动触发 refreshRenderPanelUI，但浮层滑杆数值也一起刷一遍
+      try { syncRenderQuickPanelUI(); } catch (_) {}
+    });
+  });
+  // 滑杆
+  panel.querySelectorAll('.rqp-slider').forEach((row) => {
+    const rk = row.dataset.rk;
+    const inp = row.querySelector('input[type="range"]');
+    const val = row.querySelector('.rqp-sl-val');
+    if (!rk || !inp || !val) return;
+    inp.min = row.dataset.min || inp.min;
+    inp.max = row.dataset.max || inp.max;
+    inp.step = row.dataset.step || inp.step;
+    inp.addEventListener('input', () => {
+      const v = parseFloat(inp.value);
+      const step = Number(row.dataset.step || 0.01);
+      const digits = (String(step).split('.')[1] || '').length;
+      val.textContent = Number.isFinite(v) ? v.toFixed(digits) : inp.value;
+      setParam('render', rk, Number.isFinite(v) ? v : inp.value);
+    });
+  });
+})();
+// 将 PARAMS 当前值同步到渲染快捷浮层所有控件
+function syncRenderQuickPanelUI() {
+  const panel = $('render-quick-panel');
+  if (!panel) return;
+  // 预设
+  const curPreset = String(getParam('render', 'renderPreset', 'custom'));
+  panel.querySelectorAll('.rqp-preset').forEach((pb) => {
+    pb.classList.toggle('active', pb.dataset.preset === curPreset);
+  });
+  // 开关
+  panel.querySelectorAll('.rqp-switch input[type="checkbox"]').forEach((inp) => {
+    const rk = inp.dataset.rk;
+    if (!rk) return;
+    const def = PARAM_DEFS && PARAM_DEFS.render && PARAM_DEFS.render[rk];
+    const cur = !!getParam('render', rk, def && def.v);
+    inp.checked = !!cur;
+    // label 高亮
+    inp.closest('.rqp-switch')?.classList.toggle('is-on', !!cur);
+  });
+  // 滑杆
+  panel.querySelectorAll('.rqp-slider').forEach((row) => {
+    const rk = row.dataset.rk;
+    const inp = row.querySelector('input[type="range"]');
+    const val = row.querySelector('.rqp-sl-val');
+    if (!rk || !inp || !val) return;
+    const def = PARAM_DEFS && PARAM_DEFS.render && PARAM_DEFS.render[rk];
+    const cur = Number(getParam('render', rk, def && def.v));
+    const step = Number(row.dataset.step || (def && def.step) || 0.01);
+    const digits = (String(step).split('.')[1] || '').length;
+    inp.value = Number.isFinite(cur) ? String(cur) : String(def && def.v);
+    val.textContent = Number.isFinite(cur) ? cur.toFixed(digits) : String(def && def.v);
+  });
+}
 $('btn-screenshot').addEventListener('click', async () => {
   if (!currentModel) { setStatus('没有可截图的模型', 'warn'); return; }
   const dataUrl = canvas.toDataURL('image/png');
@@ -2960,80 +5819,203 @@ document.querySelectorAll('#info-panel .tab-btn').forEach((btn) => {
     }
   });
 });
-// ---------- 参数面板 UI 渲染 ----------
+// ---------- 参数面板 UI 渲染（含手风琴 5 分组） ----------
 let currentParamGroup = 'render';
 const PARAM_GROUP_LIST = ['render', 'physics', 'ik', 'anim', 'compose'];
+// 简单 debounce：range / color 控件 → 220ms 延迟触发 applyParam（防止 GPU 重建、SSR、PMREM 抖动）
+function __debounce(fn, wait=220) {
+  let id = null;
+  return function(...args) {
+    if (id) clearTimeout(id);
+    id = setTimeout(() => { id = null; fn.apply(this, args); }, wait);
+  };
+}
+// 构造一条参数 row（公共函数：供 renderParamPanel / 手风琴 section 使用）
+function buildParamRow(g, k, d) {
+  if (!d) return null;
+  if (d.t === 'hidden' || d.t === 'lgg' /* 特殊：liftGammaGain 暂保留未来特殊控件，此处跳过 */) return null;
+  const row = document.createElement('div');
+  row.className = 'param-row';
+  row.title = d.hint || d.label || k;
+  const name = document.createElement('div');
+  name.className = 'param-name';
+  name.textContent = d.label || k;
+  const ctrl = document.createElement('div');
+  ctrl.className = 'param-control';
+  const cur = getParam(g, k, d.v);
+  if (d.t === 'switch') {
+    const id = `p_${g}_${k}`;
+    const lbl = document.createElement('label');
+    lbl.className = 'switch';
+    lbl.innerHTML = `<input id="${id}" type="checkbox" ${cur ? 'checked' : ''}><span></span>`;
+    lbl.querySelector('input').addEventListener('change', (e) => {
+      setParam(g, k, !!e.target.checked);
+    });
+    ctrl.appendChild(lbl);
+  } else if (d.t === 'range') {
+    const id = `p_${g}_${k}`;
+    const range = document.createElement('input');
+    range.type = 'range'; range.id = id;
+    range.min = d.min; range.max = d.max; range.step = d.step;
+    range.value = cur;
+    const span = document.createElement('span');
+    span.className = 'range-val';
+    span.textContent = formatRangeValue(cur, d);
+    const applyDeb = __debounce((v) => setParam(g, k, v), 220);
+    range.addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      span.textContent = formatRangeValue(v, d);
+      applyDeb(v);
+    });
+    ctrl.appendChild(range);
+    ctrl.appendChild(span);
+  } else if (d.t === 'select') {
+    const id = `p_${g}_${k}`;
+    const sel = document.createElement('select');
+    sel.className = 'param-select';
+    sel.id = id;
+    (d.options || []).forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label || val;
+      if (String(val) === String(cur)) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', (e) => setParam(g, k, e.target.value));
+    ctrl.appendChild(sel);
+  } else if (d.t === 'color') {
+    const id = `p_${g}_${k}`;
+    const cp = document.createElement('input');
+    cp.type = 'color'; cp.className = 'param-color'; cp.id = id;
+    cp.value = cur;
+    const applyDeb = __debounce((v) => setParam(g, k, v), 220);
+    cp.addEventListener('input', (e) => applyDeb(e.target.value));
+    ctrl.appendChild(cp);
+  } else if (d.t === 'file') {
+    // IES 用户贴图 / HDR 用户文件：按钮选择
+    const id = `p_${g}_${k}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = id;
+    btn.className = 'btn btn-small';
+    const label = String(cur || '').split(/[\\/]/).pop() || '未选择';
+    btn.textContent = `${d.label || k}：${label}`;
+    btn.title = d.accept || '';
+    btn.addEventListener('click', async () => {
+      try {
+        const accept = (d.accept || '*').split(',').map((x) => x && '.' + x.trim().replace(/^\./, '')).filter(Boolean).join(' ');
+        const res = await (api && api.openFile ? api.openFile({ title: `选择 ${d.label||k}`, multi: false, filters: [{ name: 'Files', extensions: (d.accept||'').split(',') }] }) : null);
+        if (!res) return;
+        if (!res.ok) return;
+        const absPath = res.data && res.data.paths ? res.data.paths[0] : (res.data || '');
+        if (!absPath) return;
+        setParam(g, k, absPath);
+        btn.textContent = `${d.label || k}：${String(absPath).split(/[\\/]/).pop()}`;
+        // 同步触发 HDR / IES 重建
+        try {
+          if (g === 'render' && k === 'hdrUserPath') {
+            try { setParam('render','hdrPreset','user',{ persist: true, apply: true }); } catch (_) {}
+          }
+          if (g === 'render' && k === 'iesUserPath') {
+            try { setParam('render','iesPreset','user',{ persist: true, apply: true }); } catch (_) {}
+          }
+        } catch (_) {}
+      } catch (e) { console.warn('[param-file]', e && e.message); }
+    });
+    ctrl.appendChild(btn);
+  }
+  row.appendChild(name);
+  row.appendChild(ctrl);
+  return row;
+}
 function renderParamPanel(group) {
   if (group && PARAM_GROUP_LIST.includes(group)) currentParamGroup = group;
   PARAM_GROUP_LIST.forEach((g) => {
-    const root = document.querySelector(`#params-${g} .group-rows`);
-    if (!root) return;
-    if (root.dataset.built === '1') {
-      syncParamValuesFromState(g);
+    if (g === 'render') {
+      // render 组：按 5 个手风琴 section 分别写入
+      const container = document.querySelector('#params-render');
+      if (!container) return;
+      if (container.dataset.built === '1') {
+        syncParamValuesFromState(g);
+        // 同步手风琴内联预设激活状态
+        try { syncInlinePresetButtons(); } catch (_) {}
+        return;
+      }
+      // 清掉 legacy（向后兼容隐藏容器）
+      const legacy = container.querySelector('.render-param-legacy');
+      if (legacy) legacy.innerHTML = '';
+      const sections = container.querySelectorAll('.accordion-section');
+      sections.forEach((secEl) => {
+        secEl.innerHTML = '';
+        const sec = secEl.dataset.section || '';
+        // preset section 的 presetRow 按钮由 DOM 保留，不需要再注入
+        const keys = RENDER_ACCORDION_SECTIONS[sec] || [];
+        const defs = PARAM_DEFS[g] || {};
+        keys.forEach((k) => {
+          const d = defs[k];
+          if (!d) return;
+          const row = buildParamRow(g, k, d);
+          if (!row) return;
+          // preset 组内的 renderPreset/presetName 不再追加（按钮由 accordion inline 处理）
+          if (sec === 'preset' && (k === 'renderPreset' || k === 'presetName')) return;
+          secEl.appendChild(row);
+        });
+      });
+      // 绑定内联预设按钮
+      try {
+        container.querySelectorAll('.accordion-inline-presets .aip-btn').forEach((b) => {
+          b.addEventListener('click', () => {
+            const p = b.dataset.preset || 'custom';
+            if (p === 'custom') setParam('render','presetName','custom',{ persist:true, apply:false });
+            else if (_PRESETS[p]) setParam('render','renderPreset', p, { persist:true, apply:true });
+            else setParam('render','renderPreset','custom',{ persist:true, apply:true });
+            try { syncInlinePresetButtons(); } catch (_) {}
+          });
+        });
+        syncInlinePresetButtons();
+      } catch (_) {}
+      // 回灌手风琴展开状态
+      try {
+        const raw = String(getParam('render','renderAccordionState','') || '');
+        if (raw) {
+          const state = JSON.parse(raw) || {};
+          const groups = container.querySelectorAll('.render-accordion-group');
+          groups.forEach((grp) => {
+            const id = grp.dataset.group || '';
+            if (state[id] === true) grp.classList.add('expanded');
+            else if (state[id] === false) grp.classList.remove('expanded');
+          });
+        }
+      } catch (_) {}
+      container.dataset.built = '1';
       return;
     }
+    // 其他组（physics/ik/anim/compose）保持原有 group-rows 扁平结构
+    const root = document.querySelector(`#params-${g} .group-rows`);
+    if (!root) return;
+    if (root.dataset.built === '1') { syncParamValuesFromState(g); return; }
     const defs = PARAM_DEFS[g] || {};
     root.innerHTML = '';
     Object.keys(defs).forEach((k) => {
-      const d = defs[k];
-      if (!d) return;
-      const row = document.createElement('div');
-      row.className = 'param-row';
-      row.title = d.hint || d.label || k;
-      const name = document.createElement('div');
-      name.className = 'param-name';
-      name.textContent = d.label || k;
-      const ctrl = document.createElement('div');
-      ctrl.className = 'param-control';
-      const cur = getParam(g, k, d.v);
-      if (d.t === 'switch') {
-        const id = `p_${g}_${k}`;
-        const lbl = document.createElement('label');
-        lbl.className = 'switch';
-        lbl.innerHTML = `<input id="${id}" type="checkbox" ${cur ? 'checked' : ''}><span></span>`;
-        lbl.querySelector('input').addEventListener('change', (e) => {
-          setParam(g, k, !!e.target.checked);
-        });
-        ctrl.appendChild(lbl);
-      } else if (d.t === 'range') {
-        const id = `p_${g}_${k}`;
-        const range = document.createElement('input');
-        range.type = 'range'; range.id = id;
-        range.min = d.min; range.max = d.max; range.step = d.step;
-        range.value = cur;
-        const span = document.createElement('span');
-        span.className = 'range-val';
-        span.textContent = formatRangeValue(cur, d);
-        range.addEventListener('input', (e) => {
-          const v = parseFloat(e.target.value);
-          span.textContent = formatRangeValue(v, d);
-          setParam(g, k, v);
-        });
-        ctrl.appendChild(range);
-        ctrl.appendChild(span);
-      } else if (d.t === 'select') {
-        const sel = document.createElement('select');
-        sel.className = 'param-select';
-        (d.options || []).forEach(([val, label]) => {
-          const o = document.createElement('option');
-          o.value = val; o.textContent = label || val;
-          if (String(val) === String(cur)) o.selected = true;
-          sel.appendChild(o);
-        });
-        sel.addEventListener('change', (e) => setParam(g, k, e.target.value));
-        ctrl.appendChild(sel);
-      } else if (d.t === 'color') {
-        const cp = document.createElement('input');
-        cp.type = 'color'; cp.className = 'param-color';
-        cp.value = cur;
-        cp.addEventListener('input', (e) => setParam(g, k, e.target.value));
-        ctrl.appendChild(cp);
-      }
-      row.appendChild(name);
-      row.appendChild(ctrl);
-      root.appendChild(row);
+      const row = buildParamRow(g, k, defs[k]);
+      if (row) root.appendChild(row);
     });
     root.dataset.built = '1';
+  });
+}
+function syncInlinePresetButtons() {
+  const container = document.querySelector('#params-render');
+  if (!container) return;
+  const name = String(getParam('render','presetName','default') || 'default');
+  const rp   = String(getParam('render','renderPreset','custom') || 'custom');
+  const cur  = rp && rp !== 'custom' ? rp : (name === 'default' ? 'custom' : 'custom');
+  const buttons = container.querySelectorAll('.accordion-inline-presets .aip-btn');
+  buttons.forEach((b) => {
+    const p = b.dataset.preset || '';
+    let active = false;
+    if (rp && rp !== 'custom') active = (p === rp);
+    else if (_PRESETS[name] && _PRESETS[name].overrides) active = (p === name);
+    else active = (p === 'custom');
+    b.classList.toggle('active', !!active);
   });
 }
 function formatRangeValue(v, d) {
@@ -3043,10 +6025,39 @@ function formatRangeValue(v, d) {
 }
 function syncParamValuesFromState(group) {
   const defs = PARAM_DEFS[group] || {};
+  if (group === 'render') {
+    // 手风琴：按 section 查 param 控件
+    const container = document.querySelector('#params-render');
+    if (!container) return;
+    Object.keys(defs).forEach((k) => {
+      const d = defs[k];
+      if (!d || d.t === 'hidden' || d.t === 'lgg') return;
+      if (k === 'renderPreset' || k === 'presetName') return; // 按钮由内联 preset 处理
+      const id = `p_${group}_${k}`;
+      const cur = getParam(group, k, d.v);
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (d.t === 'switch') { el.checked = !!cur; }
+      else if (d.t === 'range') {
+        el.value = cur;
+        const span = (el.parentElement || document).querySelector(`#${id} ~ .range-val`);
+        if (span) span.textContent = formatRangeValue(cur, d);
+      } else if (d.t === 'select') { el.value = String(cur); }
+      else if (d.t === 'color') { el.value = String(cur); }
+      else if (d.t === 'file') {
+        const label = String(cur || '').split(/[\\/]/).pop() || '未选择';
+        el.textContent = `${d.label || k}：${label}`;
+      }
+    });
+    try { syncInlinePresetButtons(); } catch (_) {}
+    try { updateRqpChip(); } catch (_) {}
+    return;
+  }
   const root = document.querySelector(`#params-${group} .group-rows`);
   if (!root) return;
   Object.keys(defs).forEach((k) => {
     const d = defs[k];
+    if (!d || d.t === 'hidden' || d.t === 'lgg') return;
     const cur = getParam(group, k, d.v);
     const id = `p_${group}_${k}`;
     if (d.t === 'switch') {
@@ -3054,19 +6065,24 @@ function syncParamValuesFromState(group) {
       if (el) el.checked = !!cur;
     } else if (d.t === 'range') {
       const el = document.getElementById(id);
-      const span = root.querySelector(`#${id} ~ .range-val`);
+      const span = (el && el.parentElement || document).querySelector(`#${id} ~ .range-val`);
       if (el) el.value = cur;
       if (span) span.textContent = formatRangeValue(cur, d);
     } else if (d.t === 'select') {
-      const sel = root.querySelector(`select.param-select`);
-      if (sel) sel.value = String(cur);
+      const el = document.getElementById(id);
+      if (el) el.value = String(cur);
     } else if (d.t === 'color') {
-      const idx = Object.keys(defs).findIndex(x => x === k);
-      const colors = root.querySelectorAll('input.param-color');
-      const pick = colors[idx];
-      if (pick) pick.value = String(cur);
+      const el = document.getElementById(id);
+      if (el) el.value = String(cur);
+    } else if (d.t === 'file') {
+      const el = document.getElementById(id);
+      if (el) {
+        const label = String(cur || '').split(/[\\/]/).pop() || '未选择';
+        el.textContent = `${d.label || k}：${label}`;
+      }
     }
   });
+  try { updateRqpChip(); } catch (_) {}
 }
 (function bindParamReset() {
   const btnGroup = $('btn-reset-group');

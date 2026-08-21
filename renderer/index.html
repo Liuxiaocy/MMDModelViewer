@@ -28,6 +28,8 @@
         <button id="btn-move-mode" class="btn" title="移动模式：开启后在预览区按住左键拖动模型到任意位置">🖐 移动模式</button>
         <button id="btn-clear-scene" class="btn" title="移除场景中已加入的场景模型（保留当前角色模型）">🧹 清空场景</button>
         <button id="btn-reset-view" class="btn" title="重置视角">重置视角</button>
+        <button id="btn-toggle-skybox" class="btn" title="切换天空盒/纯色背景">🌤 天空盒</button>
+        <button id="btn-render-panel" class="btn" title="打开渲染快捷设置面板（常用开关+预设）">⚙️ 渲染设置</button>
         <button id="btn-screenshot" class="btn btn-primary" title="导出当前视角为 PNG">📸 截图导出</button>
       </div>
       <div class="tb-group tb-misc">
@@ -199,6 +201,216 @@
         <canvas id="gl-canvas"></canvas>
         <div id="view-hint" class="view-hint">左键旋转 · 右键平移 · 滚轮缩放 · 双击模型重置视角</div>
 
+        <!-- 汇总 chip：当前 9 模块设置一瞥，悬停显示完整明细 -->
+        <div id="rqp-chip" class="rqp-chip" title="">🎯 —</div>
+        <div id="rqp-tooltip" class="rqp-tooltip hidden" role="tooltip"></div>
+        <!-- FPS 监控：右上角 -->
+        <div id="fps-monitor" class="fps-monitor" title="最近 30 帧平均 / 瞬时 / 最低帧时间 / GPU 型号">
+          <span class="fps-label">FPS</span>
+          <span id="fps-avg" class="fps-avg">—</span>
+          <span class="fps-sep">/</span>
+          <span id="fps-inst" class="fps-inst">—</span>
+          <span class="fps-sep">/</span>
+          <span id="fps-low" class="fps-low">—</span>
+          <span id="fps-gpu" class="fps-gpu" title=""></span>
+        </div>
+
+        <!-- 渲染设置快捷浮层（由工具栏 ⚙️ 渲染设置 按钮切换） -->
+        <div id="render-quick-panel" class="render-quick-panel hidden">
+          <div class="rqp-header">
+            <span class="rqp-title">⚙️ 渲染快捷设置</span>
+            <button id="rqp-close" class="pc-close" title="关闭">×</button>
+          </div>
+          <div class="rqp-body">
+            <!-- 预设选择：9 预设 + 自定义 -->
+            <div class="rqp-section">
+              <div class="rqp-section-label">🎨 渲染预设 (9)</div>
+              <div class="rqp-preset-row" id="rqp-presets">
+                <button class="rqp-preset" data-preset="default"  title="默认：均衡观感">🪴 默认</button>
+                <button class="rqp-preset" data-preset="film"     title="电影质感：AgX + 中色温">🎞 电影</button>
+                <button class="rqp-preset" data-preset="natural"  title="自然预览：色温 5600 高饱和">🌤 自然</button>
+                <button class="rqp-preset" data-preset="studio"   title="原色工作室：sRGB 线性精确">🎬 工作室</button>
+                <button class="rqp-preset" data-preset="rembrandt"title="伦勃朗三角光：45°主光 + 补光弱">🎭 伦勃朗</button>
+                <button class="rqp-preset" data-preset="butterfly"title="蝴蝶光：人脸高光蝴蝶形阴影">🦋 蝴蝶</button>
+                <button class="rqp-preset" data-preset="backlit"  title="剪影/背光：低主光高强轮廓">🌅 剪影</button>
+                <button class="rqp-preset" data-preset="coldnight"title="冷夜：3800K 冷蓝 + 弱环境">🌙 冷夜</button>
+                <button class="rqp-preset" data-preset="neon"     title="霓虹：1800K 暖黄 + HDR 霓虹环">💈 霓虹</button>
+                <button class="rqp-preset rqp-preset-custom" data-preset="custom" title="自定义：不触发批量回写">🎛 自定义</button>
+              </div>
+            </div>
+
+            <!-- 色彩通道：toneMapping / 色温 / tint / 对比 / 饱和 / vibrance -->
+            <div class="rqp-section">
+              <div class="rqp-section-label">🎨 色彩通道（CMAP）</div>
+              <div class="rqp-grid">
+                <label class="rqp-row-2"><span>色调映射</span>
+                  <select data-rk="toneMapping" class="rqp-select">
+                    <option value="agx">AgX</option><option value="aces">ACES</option>
+                    <option value="cineon">Cineon</option><option value="reinhard">Reinhard</option><option value="none">无</option>
+                  </select>
+                </label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="colorBalanceEnabled"><span>色彩校正</span></label>
+                <div class="rqp-slider" data-rk="colorTemp" data-min="2000" data-max="10000" data-step="50">
+                  <span class="rqp-sl-name">色温(K)</span>
+                  <input type="range"><span class="rqp-sl-val">5800</span>
+                </div>
+                <div class="rqp-slider" data-rk="colorTint" data-min="-50" data-max="50" data-step="1">
+                  <span class="rqp-sl-name">色调 Tint</span>
+                  <input type="range"><span class="rqp-sl-val">0</span>
+                </div>
+                <div class="rqp-slider" data-rk="contrast" data-min="0.5" data-max="1.6" data-step="0.01">
+                  <span class="rqp-sl-name">对比</span>
+                  <input type="range"><span class="rqp-sl-val">1.05</span>
+                </div>
+                <div class="rqp-slider" data-rk="saturation" data-min="0" data-max="1.6" data-step="0.01">
+                  <span class="rqp-sl-name">饱和度</span>
+                  <input type="range"><span class="rqp-sl-val">1.0</span>
+                </div>
+                <div class="rqp-slider" data-rk="vibrance" data-min="0" data-max="1.6" data-step="0.01">
+                  <span class="rqp-sl-name">Vibrance</span>
+                  <input type="range"><span class="rqp-sl-val">1.1</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 常用开关组 + 新增 (AO 模式 / 体积光 / 镜头光晕 / VSM) -->
+            <div class="rqp-section">
+              <div class="rqp-section-label">💡 光照与显示</div>
+              <div class="rqp-switches">
+                <label class="rqp-switch"><input type="checkbox" data-rk="hardLightMode"><span>硬光模式</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="keyLightEnabled"><span>聚光灯(Key)</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="rimLightEnabled"><span>轮廓光(Rim)</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="shadowEnabled"><span>阴影</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="gridVisible"><span>网格地面</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="skyboxEnabled"><span>天空盒</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="envMapAsBackground"><span>环境图作为背景</span></label>
+              </div>
+            </div>
+
+            <!-- HDR / IES / 阴影类型 -->
+            <div class="rqp-section">
+              <div class="rqp-section-label">💡 光源 / HDR / IES / 阴影</div>
+              <div class="rqp-grid">
+                <label class="rqp-row-2"><span>HDR 环境</span>
+                  <select data-rk="hdrPreset" class="rqp-select">
+                    <option value="none">程序化天空</option>
+                    <option value="studio-box">工作室棚拍</option>
+                    <option value="showroom-gray">展览灰</option>
+                    <option value="sunset">日落</option>
+                    <option value="neon-ring">霓虹环</option>
+                    <option value="window-overcast">阴天窗外</option>
+                    <option value="user">用户 HDR/EXR…</option>
+                  </select>
+                </label>
+                <div class="rqp-slider" data-rk="envMapIntensity" data-min="0" data-max="3" data-step="0.01">
+                  <span class="rqp-sl-name">环境强度</span>
+                  <input type="range"><span class="rqp-sl-val">1.0</span>
+                </div>
+                <label class="rqp-row-2"><span>IES 光形</span>
+                  <select data-rk="iesPreset" class="rqp-select">
+                    <option value="none">关闭</option>
+                    <option value="softbox-round">柔光箱(圆)</option>
+                    <option value="softbox-strip">柔光箱(长)</option>
+                    <option value="grid-spot">格栅束光</option>
+                    <option value="window-blind">百叶窗</option>
+                    <option value="user">用户贴图…</option>
+                  </select>
+                </label>
+                <label class="rqp-row-2"><span>阴影类型</span>
+                  <select data-rk="shadowMapType" class="rqp-select">
+                    <option value="none">关闭</option>
+                    <option value="basic">基础硬阴影</option>
+                    <option value="pcfsoft">PCF 软阴影</option>
+                    <option value="vsm">VSM 软阴影</option>
+                  </select>
+                </label>
+                <div class="rqp-slider" data-rk="shadowMapResK" data-min="1" data-max="8" data-step="1">
+                  <span class="rqp-sl-name">阴影分辨率 K</span>
+                  <input type="range"><span class="rqp-sl-val">2</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="rqp-section">
+              <div class="rqp-section-label">✨ 后处理与材质增强</div>
+              <div class="rqp-switches">
+                <label class="rqp-switch"><input type="checkbox" data-rk="outlineEnabled"><span>轮廓描边</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="fxaaEnabled"><span>FXAA 抗锯齿</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="bloomEnabled"><span>Bloom 泛光</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="contactShadowsEnabled"><span>接触阴影</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="ssaoEnabled"><span>SSAO 环境遮蔽</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="ssgiEnabled"><span>SSGI 全局光照</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="godRayEnabled"><span>体积光(丁达尔)</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="lensFlareEnabled"><span>镜头光晕</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="fresnelRimEnabled"><span>Fresnel 轮廓光</span></label>
+                <label class="rqp-switch"><input type="checkbox" data-rk="shaderBevelEnabled"><span>着色器假倒角</span></label>
+              </div>
+              <div class="rqp-grid rqp-grid-2col">
+                <label class="rqp-row-2"><span>AO 模式</span>
+                  <select data-rk="aoMode" class="rqp-select">
+                    <option value="off">关闭</option>
+                    <option value="ssao">SSAO</option>
+                    <option value="ssgi">SSGI</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <!-- 快速强度滑杆：新增 IES angle / GodRay / LensFlare / VSM blur -->
+            <div class="rqp-section">
+              <div class="rqp-section-label">🎚 关键强度</div>
+              <div class="rqp-sliders">
+                <div class="rqp-slider" data-rk="dirIntensity" data-min="0" data-max="8" data-step="0.1">
+                  <span class="rqp-sl-name">主光强度</span>
+                  <input type="range"><span class="rqp-sl-val">3.0</span>
+                </div>
+                <div class="rqp-slider" data-rk="keyLightIntensity" data-min="0" data-max="15" data-step="0.1">
+                  <span class="rqp-sl-name">聚光灯强度</span>
+                  <input type="range"><span class="rqp-sl-val">6.0</span>
+                </div>
+                <div class="rqp-slider" data-rk="keyLightAngle" data-min="15" data-max="80" data-step="1">
+                  <span class="rqp-sl-name">聚光角度(°)</span>
+                  <input type="range"><span class="rqp-sl-val">30</span>
+                </div>
+                <div class="rqp-slider" data-rk="bloomStrength" data-min="0" data-max="2" data-step="0.01">
+                  <span class="rqp-sl-name">泛光强度</span>
+                  <input type="range"><span class="rqp-sl-val">0.42</span>
+                </div>
+                <div class="rqp-slider" data-rk="contactShadowsOpacity" data-min="0" data-max="1" data-step="0.01">
+                  <span class="rqp-sl-name">接触阴影浓度</span>
+                  <input type="range"><span class="rqp-sl-val">0.55</span>
+                </div>
+                <div class="rqp-slider" data-rk="ssaoIntensity" data-min="0" data-max="2" data-step="0.01">
+                  <span class="rqp-sl-name">SSAO 强度</span>
+                  <input type="range"><span class="rqp-sl-val">0.75</span>
+                </div>
+                <div class="rqp-slider" data-rk="ssgiIntensity" data-min="0" data-max="2.5" data-step="0.01">
+                  <span class="rqp-sl-name">SSGI 强度</span>
+                  <input type="range"><span class="rqp-sl-val">1.0</span>
+                </div>
+                <div class="rqp-slider" data-rk="godRayIntensity" data-min="0" data-max="2.5" data-step="0.01">
+                  <span class="rqp-sl-name">体积光强度</span>
+                  <input type="range"><span class="rqp-sl-val">0.85</span>
+                </div>
+                <div class="rqp-slider" data-rk="lensFlareIntensity" data-min="0" data-max="2" data-step="0.01">
+                  <span class="rqp-sl-name">光晕强度</span>
+                  <input type="range"><span class="rqp-sl-val">0.7</span>
+                </div>
+                <div class="rqp-slider" data-rk="vsmBlurRadius" data-min="1" data-max="20" data-step="1">
+                  <span class="rqp-sl-name">VSM 模糊半径</span>
+                  <input type="range"><span class="rqp-sl-val">6</span>
+                </div>
+                <div class="rqp-slider" data-rk="fresnelRimIntensity" data-min="0" data-max="2" data-step="0.01">
+                  <span class="rqp-sl-name">Rim Shader 强度</span>
+                  <input type="range"><span class="rqp-sl-val">0.38</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="rqp-footer">
+            <button id="rqp-open-full" class="btn btn-small">打开完整参数面板 →</button>
+          </div>
+        </div>
+
         <!-- 快速预览卡 -->
         <div id="preview-card" class="preview-card hidden">
           <div class="pc-header">
@@ -222,7 +434,10 @@
 
         <!-- 右下角动作播放控制 -->
         <div id="anim-panel" class="anim-panel hidden">
-          <div class="anim-title">动作播放 (VMD)</div>
+          <div class="anim-head">
+            <span class="anim-title">🎬 动作播放 (VMD)</span>
+            <button id="btn-anim-collapse" class="anim-collapse" title="收起动画面板">—</button>
+          </div>
           <div id="vmd-list" class="vmd-list"></div>
           <div class="anim-controls">
             <button id="btn-play" class="btn btn-small">播放</button>
@@ -234,6 +449,8 @@
             <span id="speed-val" class="speed-val">1.0x</span>
           </div>
         </div>
+        <!-- 收起动画面板后的迷你展开按钮（默认隐藏，用户手动收起时显示） -->
+        <button id="anim-mini-tab" class="anim-mini-tab hidden" title="展开动画面板">🎬 动作</button>
       </section>
 
       <div class="splitter" id="splitter-right" title="拖动调整信息栏宽度"></div>
@@ -255,9 +472,65 @@
 
         <div class="tab-content hidden" data-view="params">
           <div class="panel-title">参数面板</div>
-          <div id="params-render"  class="param-group" data-group="render">
-            <div class="group-title">🎨 渲染</div>
-            <div class="group-rows"></div>
+          <div id="params-render"  class="param-group render-group-root" data-group="render">
+            <div class="group-title">🎨 渲染（共 5 组）</div>
+            <div class="accordion-root">
+              <!-- 1: 色彩通道 CMAP -->
+              <div class="render-accordion-group expanded" data-group="color">
+                <button class="rag-head" type="button" onclick="accordionRenderToggle(this.closest('.render-accordion-group').dataset.group)">
+                  <span class="rag-icon">▸</span><span class="rag-title">🎨 色彩通道（CMAP）</span>
+                  <span class="rag-meta" id="rag-meta-color">ToneMapping·色温·对比·饱和·Vibrance</span>
+                </button>
+                <div class="rag-body group-rows accordion-section" data-section="color"></div>
+              </div>
+              <!-- 2: 预设 -->
+              <div class="render-accordion-group expanded" data-group="preset">
+                <button class="rag-head" type="button" onclick="accordionRenderToggle(this.closest('.render-accordion-group').dataset.group)">
+                  <span class="rag-icon">▸</span><span class="rag-title">🎛 渲染预设（LPRESET · 9 款）</span>
+                  <span class="rag-meta" id="rag-meta-preset">一键套用 · 切到 custom 为自定义</span>
+                </button>
+                <div class="rag-body accordion-section" data-section="preset">
+                  <div class="accordion-inline-presets">
+                    <button class="aip-btn" data-preset="default">🪴 默认</button>
+                    <button class="aip-btn" data-preset="film">🎞 电影</button>
+                    <button class="aip-btn" data-preset="natural">🌤 自然</button>
+                    <button class="aip-btn" data-preset="studio">🎬 工作室</button>
+                    <button class="aip-btn" data-preset="rembrandt">🎭 伦勃朗</button>
+                    <button class="aip-btn" data-preset="butterfly">🦋 蝴蝶</button>
+                    <button class="aip-btn" data-preset="backlit">🌅 剪影</button>
+                    <button class="aip-btn" data-preset="coldnight">🌙 冷夜</button>
+                    <button class="aip-btn" data-preset="neon">💈 霓虹</button>
+                    <button class="aip-btn aip-custom" data-preset="custom">🎛 自定义</button>
+                  </div>
+                  <div class="group-rows" data-section-rows="preset"></div>
+                </div>
+              </div>
+              <!-- 3: 灯光 / HDR / IES（光源） -->
+              <div class="render-accordion-group" data-group="light">
+                <button class="rag-head" type="button" onclick="accordionRenderToggle(this.closest('.render-accordion-group').dataset.group)">
+                  <span class="rag-icon">▸</span><span class="rag-title">💡 光照 & HDR & IES</span>
+                  <span class="rag-meta" id="rag-meta-light">主光/聚光/Rim/5款环境/4款光形</span>
+                </button>
+                <div class="rag-body group-rows accordion-section" data-section="light"></div>
+              </div>
+              <!-- 4: 特效：接触阴影/AO/SSGI/GodRay/Lens/Bloom -->
+              <div class="render-accordion-group" data-group="effects">
+                <button class="rag-head" type="button" onclick="accordionRenderToggle(this.closest('.render-accordion-group').dataset.group)">
+                  <span class="rag-icon">▸</span><span class="rag-title">🌫 后处理特效</span>
+                  <span class="rag-meta" id="rag-meta-effects">接触阴影/AO/SSGI/体积光/光晕/Bloom/描边/AA</span>
+                </button>
+                <div class="rag-body group-rows accordion-section" data-section="effects"></div>
+              </div>
+              <!-- 5: 阴影 & VSM & 材质增强 -->
+              <div class="render-accordion-group" data-group="shadow">
+                <button class="rag-head" type="button" onclick="accordionRenderToggle(this.closest('.render-accordion-group').dataset.group)">
+                  <span class="rag-icon">▸</span><span class="rag-title">🖼 阴影 & 材质增强</span>
+                  <span class="rag-meta" id="rag-meta-shadow">VSM/PCF/Bias/分辨率；Fresnel Rim / 假倒角</span>
+                </button>
+                <div class="rag-body group-rows accordion-section" data-section="shadow"></div>
+              </div>
+            </div>
+            <div class="group-rows render-param-legacy" style="display:none;"></div>
           </div>
           <div id="params-physics" class="param-group" data-group="physics">
             <div class="group-title">🪶 物理</div>
